@@ -1,15 +1,15 @@
-# tsauth — Biometric Access Verification for Tailscale
+# TSAuth — Biometric Access Verification for Tailscale
 
 **⚠️ Active development. Not yet ready for production use.**
 
-![tsauth — Biometric Access Verification for Tailscale](./docs/banner.webp)
+![TSAuth — Biometric Access Verification for Tailscale](./docs/banner.webp)
 
-tsauth adds biometric step-up verification to [Tailscale](https://tailscale.com/) network access. Before a protected resource can be reached — whether a browser application, native API, database, or SSH server — the user must approve the access attempt using device-native biometrics (fingerprint or facial recognition) on a trusted mobile device.
+TSAuth adds biometric step-up verification to [Tailscale](https://tailscale.com/) network access. Before a protected resource can be reached — whether a browser application, native API, database, or SSH server — the user must approve the access attempt using device-native biometrics (fingerprint or facial recognition) on a trusted mobile device.
 
 ## How It Works
 
 1. A user or application attempts to reach a protected Tailscale resource.
-2. The tsauth enforcement daemon on the destination node evaluates policy and pauses the connection.
+2. The TSAuth enforcement daemon on the destination node evaluates policy and pauses the connection.
 3. An approval request is sent to the user's enrolled Android device.
 4. The user verifies their identity with fingerprint or face unlock.
 5. Upon approval, a short-lived, cryptographically bound Access Grant Token is issued.
@@ -66,7 +66,7 @@ make test-unit
 DATABASE_URL=postgres://localhost:5432/tsauth make db-migrate
 
 # Start the approval service
-cd service && go run ./cmd/approval-service/ -config /etc/dnivio/config.json
+cd service && go run ./cmd/approval-service/ -config /etc/tsauth/config.json
 ```
 
 ## Documentation
@@ -84,8 +84,11 @@ This project is in **active development**. All 15 Critical and 30 High findings 
 
 ## License
 
-Proprietary. All rights reserved.
+Licensed under the [BSD 3-Clause License](./LICENSE).
+
+Copyright (c) 2020 Tailscale Inc & contributors. TSAuth retains Tailscale's
+copyright and license notice for code derived from the Tailscale project.
 
 ---
 
-Built to `ENGINEERING.md` v2.1. Developed by [Dnivio](https://github.com/dnivio).
+Built to `ENGINEERING.md` v2.1 by the TSAuth contributors.
