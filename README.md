@@ -3,7 +3,7 @@
 **⚠️ Active development. Not yet ready for production use.**
 
 ![A sleek cybersecurity banner shows Dnivio's "tailscale-2fa" project, featuring a smartphone displaying a biometric approval prompt alongside visual flows connecting SSH, Tailscale, and authenticated access. The dark blue design emphasizes secure, biometric-gated access to Tailscale-protected servers and applications.
-](docs/dnivio.png)
+](blob:https://github.com/697bd024-d584-4ebb-b9f0-bb11721e09e7)
 
 
 Dnivio adds biometric step-up verification to [Tailscale](https://tailscale.com/) network access. Before a protected resource can be reached — whether a browser application, native API, database, or SSH server — the user must approve the access attempt using device-native biometrics (fingerprint or facial recognition) on a trusted mobile device.
