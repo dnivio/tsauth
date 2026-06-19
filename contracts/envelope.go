@@ -152,8 +152,8 @@ func ComputeDisplayDigest(p *RequestPayload) []byte {
 	writeField(fmt.Sprintf("%d", p.PolicyVersion))
 	writeField(p.RuleID)
 	writeField(string(p.ScopeRequested))
-	writeField(p.IssuedAt.Format(time.RFC3339Nano))
-	writeField(p.ExpiresAt.Format(time.RFC3339Nano))
+	writeField(fmt.Sprintf("%d", p.IssuedAt.Truncate(time.Second).Unix()))
+	writeField(fmt.Sprintf("%d", p.ExpiresAt.Truncate(time.Second).Unix()))
 
 	// Include binding
 	bindingBytes, _ := cose.EncodeCanonical(p.Binding)

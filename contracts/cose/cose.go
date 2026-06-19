@@ -119,6 +119,11 @@ func Sign1(signer ed25519.PrivateKey, kid, typ string, payload, externalAAD []by
 		return nil, fmt.Errorf("cose: marshal protected headers: %w", err)
 	}
 
+	// Normalize nil externalAAD to empty slice for canonical encoding
+	if externalAAD == nil {
+		externalAAD = []byte{}
+	}
+
 	// Build SigStructure
 	sigStruct := sigStructure{
 		Context:     "Signature1",
