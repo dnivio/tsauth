@@ -2,7 +2,7 @@
 
 **⚠️ Active development. Not yet ready for production use.**
 
-![Dnivio — Biometric Access Verification for Tailscale](./docs/banner.png)
+[![Dnivio — Biometric Access Verification for Tailscale](https://github.com/dnivio/tsauth/blob/main/docs/banner.png?raw=true)](https://github.com/dnivio/tsauth/blob/main/docs/banner.png)
 
 
 Dnivio adds biometric step-up verification to [Tailscale](https://tailscale.com/) network access. Before a protected resource can be reached — whether a browser application, native API, database, or SSH server — the user must approve the access attempt using device-native biometrics (fingerprint or facial recognition) on a trusted mobile device.
