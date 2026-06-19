@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DnivioApprover" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/dnivio_blue</item>
+        <item name="android:colorPrimaryDark">@color/dnivio_blue_dark</item>
+        <item name="android:colorAccent">@color/dnivio_blue</item>
+        <item name="android:statusBarColor">@color/dnivio_blue_dark</item>
+        <item name="android:navigationBarColor">@color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <style name="Theme.DnivioApprover.Transparent" parent="Theme.DnivioApprover">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+    </style>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="dnivio_blue">#FF2563EB</color>
+    <color name="dnivio_blue_dark">#FF1E40AF</color>
+    <color name="dnivio_red">#FFDC2626</color>
+    <color name="dnivio_slate">#FF0F172A</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="black">#FF000000</color>
+</resources>

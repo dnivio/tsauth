@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Production: pin the Approval Service certificate -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">approval.dnivio.dev</domain>
+        <pin-set expiration="2027-06-01">
+            <!-- Dnivio Approval Service TLS certificate pin -->
+            <!-- SHA-256 fingerprint goes here in production -->
+        </pin-set>
+    </domain-config>
+
+    <!-- Debug: allow cleartext for local development -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

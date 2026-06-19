@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dnivio Approver</string>
+
+    <!-- Notification Channels -->
+    <string name="channel_approval_name">Approval Requests</string>
+    <string name="channel_approval_desc">Biometric approval requests for protected resources</string>
+    <string name="channel_status_name">Service Status</string>
+    <string name="channel_status_desc">Background service status and connectivity</string>
+
+    <!-- Notifications -->
+    <string name="notification_approval_title">Access Verification Required</string>
+    <string name="notification_approval_text">Tap to approve or deny access to a protected resource</string>
+    <string name="service_active_title">Dnivio Approver</string>
+    <string name="service_active_text">Waiting for approval requests</string>
+
+    <!-- Biometric -->
+    <string name="biometric_title">Verify Your Identity</string>
+    <string name="biometric_subtitle">Confirm access to protected resource</string>
+    <string name="biometric_description">Use fingerprint or face to approve this access request</string>
+    <string name="biometric_no_hardware">This device does not support biometric authentication</string>
+    <string name="biometric_unavailable">Biometric authentication is currently unavailable</string>
+    <string name="biometric_not_enrolled">No biometric credentials are enrolled on this device</string>
+    <string name="biometric_security_update">A security update is required to use biometrics</string>
+    <string name="biometric_failed">Biometric verification failed — try again</string>
+
+    <!-- Approval -->
+    <string name="approval_sent">Response sent</string>
+    <string name="approval_failed">Failed to send response</string>
+    <string name="approval_denied">Access denied</string>
+
+    <!-- Enrollment -->
+    <string name="enrollment_title">Enroll Device</string>
+    <string name="enrollment_scan_qr">Scan the enrollment QR code or enter the ticket below</string>
+    <string name="enrollment_ticket_hint">Enrollment ticket</string>
+    <string name="enrollment_submit">Enroll</string>
+    <string name="enrollment_success">Device enrolled successfully</string>
+    <string name="enrollment_failed">Enrollment failed</string>
+    <string name="enrollment_error_ticket">Invalid or expired enrollment ticket</string>
+    <string name="enrollment_error_attestation">Device attestation failed — hardware security requirement not met</string>
+    <string name="enrollment_error_keys">Key generation failed</string>
+
+    <!-- Accessibility -->
+    <string name="a11y_approve_button">Approve access using biometric verification</string>
+    <string name="a11y_deny_button">Deny access</string>
+    <string name="a11y_timer">Approval request expires in %d seconds</string>
+    <string name="a11y_destination">Destination: %s</string>
+    <string name="a11y_source">Requesting device: %s</string>
+
+    <!-- Content descriptions -->
+    <string name="desc_shield_icon">Dnivio shield icon</string>
+</resources>
