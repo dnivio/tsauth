@@ -1,0 +1,876 @@
+// Copyright (c) 2026 Dnivio. All rights reserved.
+// SPDX-License-Identifier: Proprietary
+//
+// Dnivio Authorization Plane Protocol Buffers
+// Per ENGINEERING.md v2.1 §11 and §21.
+// Field numbers and types are frozen; they form the wire contract.
+
+syntax = "proto3";
+
+package dnivio.v2;
+
+option go_package = "github.com/dnivio/contracts/proto/dnivio;dnivio";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/field_mask.proto";
+
+// ─── Enforcement Channel (daemon ↔ service, §11.1) ────────────────────────
+
+service EnforcementChannel {
+  // DaemonRegister registers a protected node with the service.
+  rpc DaemonRegister(DaemonRegisterRequest) returns (DaemonRegisterResponse);
+
+  // CreateApprovalRequest creates a new approval request for a protected resource access attempt.
+  rpc CreateApprovalRequest(CreateApprovalRequestRequest) returns (CreateApprovalRequestResponse);
+
+  // CancelApprovalRequest cancels a pending approval request (DR-SVC-3).
+  rpc CancelApprovalRequest(CancelApprovalRequestRequest) returns (CancelApprovalRequestResponse);
+
+  // CheckGrant validates and consumes a grant, releasing traffic if valid.
+  rpc CheckGrant(CheckGrantRequest) returns (CheckGrantResponse);
+
+  // AckRevocation acknowledges receipt of a revocation message (DR-REV-2).
+  rpc AckRevocation(AckRevocationRequest) returns (AckRevocationResponse);
+
+  // StreamEvents establishes a bidirectional stream for outbox delivery and daemon heartbeats.
+  rpc StreamEvents(stream DaemonMessage) returns (stream ServiceMessage);
+}
+
+// ─── Approver Channel (app ↔ service, §11.1) ──────────────────────────────
+
+service ApproverChannel {
+  // ApproverHello establishes a session and authenticates the device.
+  rpc ApproverHello(ApproverHelloRequest) returns (ApproverHelloResponse);
+
+  // FetchPendingRequests retrieves pending approval requests for the device.
+  rpc FetchPendingRequests(FetchPendingRequestsRequest) returns (FetchPendingRequestsResponse);
+
+  // SubmitApproval submits an approval or denial decision with the signed response.
+  rpc SubmitApproval(SubmitApprovalRequest) returns (SubmitApprovalResponse);
+
+  // AckMessage acknowledges delivery of a service message.
+  rpc AckMessage(AckMessageRequest) returns (AckMessageResponse);
+}
+
+// ─── Admin REST service (§11.1) ───────────────────────────────────────────
+
+service AdminService {
+  // Tenant management
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+
+  // User management
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc LinkIdentity(LinkIdentityRequest) returns (LinkIdentityResponse);
+
+  // Device management
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  rpc GetDevice(GetDeviceRequest) returns (GetDeviceResponse);
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  // Node management
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc RevokeNode(RevokeNodeRequest) returns (RevokeNodeResponse);
+  rpc IssueNodeBootstrap(IssueNodeBootstrapRequest) returns (IssueNodeBootstrapResponse);
+
+  // Resource management
+  rpc RegisterResource(RegisterResourceRequest) returns (RegisterResourceResponse);
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc GetResource(GetResourceRequest) returns (GetResourceResponse);
+  rpc DeregisterResource(DeregisterResourceRequest) returns (DeregisterResourceResponse);
+
+  // Policy management
+  rpc PublishPolicy(PublishPolicyRequest) returns (PublishPolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc SimulatePolicy(SimulatePolicyRequest) returns (SimulatePolicyResponse);
+
+  // Audit
+  rpc SearchAuditEvents(SearchAuditEventsRequest) returns (SearchAuditEventsResponse);
+  rpc ExportAudit(ExportAuditRequest) returns (ExportAuditResponse);
+
+  // Break-glass
+  rpc InitiateBreakGlass(InitiateBreakGlassRequest) returns (InitiateBreakGlassResponse);
+  rpc ExecuteBreakGlass(ExecuteBreakGlassRequest) returns (ExecuteBreakGlassResponse);
+
+  // Enrollment
+  rpc IssueEnrollmentTicket(IssueEnrollmentTicketRequest) returns (IssueEnrollmentTicketResponse);
+  rpc CompleteEnrollment(CompleteEnrollmentRequest) returns (CompleteEnrollmentResponse);
+}
+
+// ─── Shared types ──────────────────────────────────────────────────────────
+
+// Principal is the typed identity of an access attempt source.
+message Principal {
+  string tenant_id = 1 [(validate.rules).string.uuid = true];
+  string tailnet_id = 2;
+  string src_node_id = 3;
+  int64 src_node_key_epoch = 4;
+  PrincipalKind kind = 5;
+  OIDCIdentity user = 6;
+  NodeState node_state = 7;
+  string posture_version = 8;
+}
+
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_HUMAN = 1;
+  PRINCIPAL_KIND_TAGGED = 2;
+  PRINCIPAL_KIND_SERVICE = 3;
+  PRINCIPAL_KIND_SUBNET_ROUTER = 4;
+  PRINCIPAL_KIND_APP_CONNECTOR = 5;
+  PRINCIPAL_KIND_UNKNOWN = 6;
+}
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_OK = 1;
+  NODE_STATE_EXPIRED = 2;
+  NODE_STATE_DELETED = 3;
+  NODE_STATE_KEY_CHANGED = 4;
+}
+
+message OIDCIdentity {
+  string issuer = 1;
+  string subject = 2;
+  string user_id = 3;
+}
+
+// ResourceID is the canonical typed identifier for a protected resource.
+message ResourceID {
+  string tenant_id = 1;
+  string protected_node_id = 2;
+  string service_id = 3;
+  int32 port = 4;
+  Transport transport = 5;
+  DeploymentMode deployment_mode = 6;
+}
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_TCP = 1;
+}
+
+enum DeploymentMode {
+  DEPLOYMENT_MODE_UNSPECIFIED = 0;
+  DEPLOYMENT_MODE_HTTP_PROXY = 1;
+  DEPLOYMENT_MODE_OPAQUE_TCP = 2;
+  DEPLOYMENT_MODE_TS_SSH = 3;
+  DEPLOYMENT_MODE_OPENSSH = 4;
+}
+
+enum EnforcementDecision {
+  ENFORCEMENT_DECISION_UNSPECIFIED = 0;
+  ENFORCEMENT_DECISION_NOT_PROTECTED = 1;
+  ENFORCEMENT_DECISION_ALLOW_WITHOUT_STEP_UP = 2;
+  ENFORCEMENT_DECISION_REQUIRE_STEP_UP = 3;
+  ENFORCEMENT_DECISION_DENY = 4;
+}
+
+enum Scope {
+  SCOPE_UNSPECIFIED = 0;
+  SCOPE_REQUEST = 1;
+  SCOPE_CONNECTION = 2;
+  SCOPE_DURATION = 3;
+  SCOPE_SESSION = 4;
+}
+
+enum Sensitivity {
+  SENSITIVITY_UNSPECIFIED = 0;
+  SENSITIVITY_STANDARD = 1;
+  SENSITIVITY_HIGH = 2;
+  SENSITIVITY_ADMIN = 3;
+}
+
+enum SecurityLevel {
+  SECURITY_LEVEL_UNSPECIFIED = 0;
+  SECURITY_LEVEL_STRONGBOX = 1;
+  SECURITY_LEVEL_TEE = 2;
+}
+
+enum ApprovalState {
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  APPROVAL_STATE_PENDING = 1;
+  APPROVAL_STATE_APPROVED = 2;
+  APPROVAL_STATE_GRANTED = 3;
+  APPROVAL_STATE_DENIED = 4;
+  APPROVAL_STATE_EXPIRED = 5;
+  APPROVAL_STATE_CANCELLED = 6;
+}
+
+// ─── Enforcement Channel Messages ──────────────────────────────────────────
+
+message DaemonRegisterRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string tailnet_id = 3;
+  string ts_stable_node_id = 4;
+  bytes csr_der = 5; // Certificate Signing Request in DER format
+}
+
+message DaemonRegisterResponse {
+  string node_id = 1;
+  bytes certificate_der = 2; // Signed mTLS certificate
+  bytes trust_bundle = 3;     // PEM-encoded CA bundle
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CreateApprovalRequestRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string tailnet_id = 3;
+  string src_node_id = 4;
+  int64 src_node_key_epoch = 5;
+  string resource_id = 6;
+  string protocol = 7;
+  Scope scope = 8;
+  bytes binding_cbor = 9; // CBOR-encoded ScopeBinding
+  string ssh_account = 10;
+}
+
+message CreateApprovalRequestResponse {
+  string request_id = 1;
+  bytes request_envelope = 2;   // COSE_Sign1 serialized RequestEnvelope
+  string poll_cap = 3;          // Polling capability for browser interstitial
+  string redeem_cap = 4;        // One-time redemption capability
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message CancelApprovalRequestRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string request_id = 3;
+  string reason = 4;
+}
+
+message CancelApprovalRequestResponse {
+  ApprovalState previous_state = 1;
+  ApprovalState new_state = 2;
+}
+
+message CheckGrantRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string src_node_id = 3;
+  int64 src_node_key_epoch = 4;
+  string resource_id = 5;
+  bytes agt_cbor = 6; // COSE_Sign1 serialized AGT
+  string redeem_cap = 7; // For HTTP_PROXY one-time redemption
+}
+
+message CheckGrantResponse {
+  bool allowed = 1;
+  bytes grant_payload = 2; // Decoded AGT payload
+  string decision_reason = 3;
+}
+
+message AckRevocationRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  int64 seq = 3; // Acknowledged revocation sequence number
+}
+
+message AckRevocationResponse {
+  bool success = 1;
+}
+
+message DaemonMessage {
+  oneof message {
+    DaemonRegisterRequest register = 1;
+    CreateApprovalRequestRequest create_approval = 2;
+    CancelApprovalRequestRequest cancel_approval = 3;
+    CheckGrantRequest check_grant = 4;
+    AckRevocationRequest ack_revocation = 5;
+  }
+}
+
+message ServiceMessage {
+  oneof message {
+    bytes signed_request_envelope = 1; // COSE_Sign1 RequestEnvelope to forward to approver
+    bytes signed_grant = 2;            // COSE_Sign1 AGT
+    RevocationNotification revocation = 3;
+    PolicyUpdateNotification policy_update = 4;
+    AckResponse ack = 5;
+    ErrorResponse error = 6;
+  }
+}
+
+message RevocationNotification {
+  int64 seq = 1;
+  RevocationKind kind = 2;
+  string target = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+enum RevocationKind {
+  REVOCATION_KIND_UNSPECIFIED = 0;
+  REVOCATION_KIND_USER = 1;
+  REVOCATION_KIND_SOURCE_NODE = 2;
+  REVOCATION_KIND_PROTECTED_NODE = 3;
+  REVOCATION_KIND_DEVICE = 4;
+  REVOCATION_KIND_KEY = 5;
+  REVOCATION_KIND_CERT = 6;
+  REVOCATION_KIND_GRANT = 7;
+  REVOCATION_KIND_POLICY = 8;
+}
+
+message PolicyUpdateNotification {
+  int64 version = 1;
+  int64 epoch = 2;
+  bytes policy_bundle_cbor = 3; // COSE_Sign1 serialized policy bundle
+}
+
+message AckResponse {
+  uint64 message_id = 1;
+}
+
+// ─── Approver Channel Messages ─────────────────────────────────────────────
+
+message ApproverHelloRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string device_id = 3;
+  bytes hello_signature = 4; // Signed by device_auth
+}
+
+message ApproverHelloResponse {
+  string session_token = 1;
+  int64 last_acked_seq = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message FetchPendingRequestsRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string device_id = 3;
+}
+
+message FetchPendingRequestsResponse {
+  repeated bytes request_envelopes = 1; // COSE_Sign1 serialized RequestEnvelopes
+}
+
+message SubmitApprovalRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string device_id = 3;
+  bytes approval_response = 4; // CBOR-encoded ApprovalResponse with signature
+}
+
+message SubmitApprovalResponse {
+  bool accepted = 1;
+  string status = 2;
+}
+
+message AckMessageRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string device_id = 3;
+  int64 seq = 4;
+}
+
+message AckMessageResponse {
+  bool success = 1;
+}
+
+// ─── Admin Messages ────────────────────────────────────────────────────────
+
+message CreateTenantRequest {
+  string idempotency_key = 1;
+  string name = 2;
+}
+
+message CreateTenantResponse {
+  string tenant_id = 1;
+}
+
+message GetTenantRequest {
+  string tenant_id = 1;
+}
+
+message GetTenantResponse {
+  Tenant tenant = 1;
+}
+
+message Tenant {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message UpdateTenantRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string name = 3;
+  google.protobuf.FieldMask update_mask = 4;
+}
+
+message UpdateTenantResponse {
+  Tenant tenant = 1;
+}
+
+message ListUsersRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListUsersResponse {
+  repeated User users = 1;
+  string next_page_token = 2;
+}
+
+message User {
+  string id = 1;
+  string tenant_id = 2;
+  string oidc_issuer = 3;
+  string oidc_subject = 4;
+  string email = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message GetUserRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message LinkIdentityRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string tailnet_id = 3;
+  string tailscale_user_id = 4;
+  string user_id = 5;
+}
+
+message LinkIdentityResponse {
+  string link_id = 1;
+  int64 authz_epoch = 2;
+}
+
+message ListDevicesRequest {
+  string tenant_id = 1;
+  string user_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListDevicesResponse {
+  repeated Device devices = 1;
+  string next_page_token = 2;
+}
+
+message Device {
+  string id = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  SecurityLevel security_level = 4;
+  DeviceState state = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp revoked_at = 7;
+}
+
+enum DeviceState {
+  DEVICE_STATE_UNSPECIFIED = 0;
+  DEVICE_STATE_ENROLLED = 1;
+  DEVICE_STATE_REVOKED = 2;
+}
+
+message GetDeviceRequest {
+  string tenant_id = 1;
+  string device_id = 2;
+}
+
+message GetDeviceResponse {
+  Device device = 1;
+}
+
+message RevokeDeviceRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string device_id = 3;
+  string reason = 4;
+}
+
+message RevokeDeviceResponse {
+  bool success = 1;
+  int64 revocation_seq = 2;
+}
+
+message ListNodesRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+  string next_page_token = 2;
+}
+
+message Node {
+  string id = 1;
+  string tenant_id = 2;
+  string ts_stable_node_id = 3;
+  string tailnet_id = 4;
+  string cert_state = 5;
+  int64 node_key_epoch = 6;
+  google.protobuf.Timestamp last_seen = 7;
+}
+
+message GetNodeRequest {
+  string tenant_id = 1;
+  string node_id = 2;
+}
+
+message GetNodeResponse {
+  Node node = 1;
+}
+
+message RevokeNodeRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string node_id = 3;
+  string reason = 4;
+}
+
+message RevokeNodeResponse {
+  bool success = 1;
+  int64 revocation_seq = 2;
+}
+
+message IssueNodeBootstrapRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string tailnet_id = 3;
+  string ts_stable_node_id = 4;
+  google.protobuf.Duration ttl = 5;
+}
+
+message IssueNodeBootstrapResponse {
+  string bootstrap_token = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message RegisterResourceRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string node_id = 3;
+  string service_id = 4;
+  int32 port = 5;
+  Transport transport = 6;
+  DeploymentMode deployment_mode = 7;
+  Sensitivity sensitivity = 8;
+  SecurityLevel required_security_level = 9;
+  string display_name = 10;
+}
+
+message RegisterResourceResponse {
+  string resource_id = 1;
+}
+
+message ListResourcesRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListResourcesResponse {
+  repeated Resource resources = 1;
+  string next_page_token = 2;
+}
+
+message Resource {
+  string id = 1;
+  string tenant_id = 2;
+  string node_id = 3;
+  string service_id = 4;
+  int32 port = 5;
+  Transport transport = 6;
+  DeploymentMode deployment_mode = 7;
+  Sensitivity sensitivity = 8;
+  SecurityLevel required_security_level = 9;
+  string display_name = 10;
+}
+
+message GetResourceRequest {
+  string tenant_id = 1;
+  string resource_id = 2;
+}
+
+message GetResourceResponse {
+  Resource resource = 1;
+}
+
+message DeregisterResourceRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string resource_id = 3;
+}
+
+message DeregisterResourceResponse {
+  bool success = 1;
+}
+
+message PublishPolicyRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  bytes policy_document_cbor = 3; // CBOR-encoded policy document
+  bool dry_run = 4;
+}
+
+message PublishPolicyResponse {
+  int64 version = 1;
+  int64 epoch = 2;
+  bytes policy_bundle_cbor = 3; // COSE_Sign1 serialized policy bundle
+  repeated string warnings = 4;
+  repeated string errors = 5;
+  bool published = 6;
+}
+
+message GetPolicyRequest {
+  string tenant_id = 1;
+  int64 version = 2; // 0 for latest
+}
+
+message GetPolicyResponse {
+  PolicyBundle bundle = 1;
+}
+
+message PolicyBundle {
+  int64 version = 1;
+  int64 epoch = 2;
+  bytes document_cbor = 3;
+  string kid = 4;
+  google.protobuf.Timestamp issued_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  string min_daemon_version = 7;
+}
+
+message ListPoliciesRequest {
+  string tenant_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListPoliciesResponse {
+  repeated PolicyBundle bundles = 1;
+  string next_page_token = 2;
+}
+
+message SimulatePolicyRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  bytes policy_document_cbor = 3;
+  repeated SimulationScenario scenarios = 4;
+}
+
+message SimulationScenario {
+  string src_node_id = 1;
+  PrincipalKind src_kind = 2;
+  string resource_id = 3;
+  string protocol = 4;
+  Scope requested_scope = 5;
+}
+
+message SimulatePolicyResponse {
+  repeated SimulationResult results = 1;
+}
+
+message SimulationResult {
+  SimulationScenario scenario = 1;
+  EnforcementDecision decision = 2;
+  string matched_rule_id = 3;
+  string explanation = 4;
+}
+
+message SearchAuditEventsRequest {
+  string tenant_id = 1;
+  google.protobuf.Timestamp start_time = 2;
+  google.protobuf.Timestamp end_time = 3;
+  string event_type = 4;
+  string user_id = 5;
+  string device_id = 6;
+  string resource_id = 7;
+  int32 page_size = 8;
+  string page_token = 9;
+}
+
+message SearchAuditEventsResponse {
+  repeated AuditEvent events = 1;
+  string next_page_token = 2;
+}
+
+message AuditEvent {
+  string tenant_id = 1;
+  int64 seq = 2;
+  string event_type = 3;
+  string producer = 4;
+  string user_id = 5;
+  string device_id = 6;
+  string resource_id = 7;
+  string result = 8;
+  string request_id = 9;
+  string correlation_id = 10;
+  bytes payload_json = 11;
+  google.protobuf.Timestamp occurred_at = 12;
+}
+
+message ExportAuditRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  google.protobuf.Timestamp start_time = 3;
+  google.protobuf.Timestamp end_time = 4;
+  string format = 5; // "jsonl" or "csv"
+  string recipient_public_key_pem = 6; // for encrypted export
+}
+
+message ExportAuditResponse {
+  string export_id = 1;
+  string status = 2;
+}
+
+message InitiateBreakGlassRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  string src_node_id = 4;
+  string resource_id = 5;
+  string protocol = 6;
+  string reason = 7;
+  string incident_id = 8;
+  bytes custodian_1_signature = 9;
+  bytes custodian_2_signature = 10;
+  bytes custodian_3_signature = 11;
+}
+
+message InitiateBreakGlassResponse {
+  string authorization_id = 1;
+  bytes signed_authorization = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message ExecuteBreakGlassRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string authorization_id = 3;
+  bytes signed_authorization = 4;
+}
+
+message ExecuteBreakGlassResponse {
+  bool granted = 1;
+  string session_id = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message IssueEnrollmentTicketRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  google.protobuf.Duration ttl = 4;
+}
+
+message IssueEnrollmentTicketResponse {
+  string ticket = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message CompleteEnrollmentRequest {
+  string idempotency_key = 1;
+  string tenant_id = 2;
+  string ticket = 3;
+  bytes device_auth_attestation = 4; // CBOR-encoded attestation chain
+  bytes approval_auth_attestation = 5; // CBOR-encoded attestation chain
+  bytes device_auth_pub = 6; // SubjectPublicKeyInfo DER
+  bytes approval_auth_pub = 7; // SubjectPublicKeyInfo DER
+}
+
+message CompleteEnrollmentResponse {
+  string device_id = 1;
+  bytes trust_bundle = 2; // Root public key bundle
+}
+
+// ─── Error taxonomy (DR-ERR-1) ─────────────────────────────────────────────
+
+message ErrorResponse {
+  string code = 1;            // Stable machine-readable error code
+  string message = 2;         // User-safe localized message
+  string correlation_id = 3;  // For operator diagnostic lookup
+  ErrorClass error_class = 4;
+  bool retryable = 5;
+  google.protobuf.Duration retry_after = 6;
+  repeated ErrorDetail details = 7;
+}
+
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  ERROR_CLASS_USER_SAFE = 1;      // Suitable for display to end users
+  ERROR_CLASS_OPERATOR = 2;       // Diagnostic details for operators
+  ERROR_CLASS_INTERNAL = 3;       // Must not be exposed to users
+}
+
+message ErrorDetail {
+  string field = 1;
+  string reason = 2;
+  string code = 3;
+}
+
+// Standard error codes
+enum ErrorCode {
+  // Success
+  OK = 0;
+
+  // Authentication (4xx)
+  UNAUTHENTICATED = 16;
+  PERMISSION_DENIED = 7;
+  FORBIDDEN = 8;
+  TENANT_NOT_FOUND = 100;
+  DEVICE_REVOKED = 101;
+  NODE_UNAUTHORIZED = 102;
+  INSUFFICIENT_SECURITY_LEVEL = 103;
+  SEPARATION_OF_DUTIES_VIOLATION = 104;
+
+  // Request validation (4xx)
+  INVALID_ARGUMENT = 3;
+  INVALID_IDEMPOTENCY_KEY = 105;
+  CONFLICTING_REQUEST = 106;
+  POLICY_VALIDATION_ERROR = 107;
+  COVERAGE_ERROR = 108;
+  UNSUPPORTED_SCOPE_MODE = 109;
+  DUPLICATE_REQUEST = 110;
+
+  // Resource state (4xx)
+  NOT_FOUND = 5;
+  ALREADY_EXISTS = 6;
+  RESOURCE_EXHAUSTED = 9;
+  FAILED_PRECONDITION = 10;
+  REQUEST_EXPIRED = 111;
+  GRANT_EXPIRED = 112;
+  APPROVAL_ALREADY_TERMINAL = 113;
+  CANCELLED = 114;
+  REVOKED = 115;
+
+  // Rate limiting (4xx)
+  RATE_LIMITED = 116;
+  QUOTA_EXCEEDED = 117;
+  PENDING_LIMIT_EXCEEDED = 118;
+  HELD_CONNECTION_LIMIT_EXCEEDED = 119;
+
+  // System (5xx)
+  INTERNAL_ERROR = 13;
+  UNAVAILABLE = 14;
+  DEGRADED = 120;
+  KMS_ERROR = 121;
+  DATABASE_ERROR = 122;
+  VAULT_UNAVAILABLE = 123;
+  VALKEY_UNAVAILABLE = 124;
+  POLICY_STALE = 125;
+  REVOCATION_STALE = 126;
+  INVENTORY_STALE = 127;
+}

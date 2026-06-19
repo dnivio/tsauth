@@ -1,0 +1,25 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test coverage
+*.out
+coverage/
+
+# Dependencies
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Remember
+.remember/tmp/
+.remember/logs/
