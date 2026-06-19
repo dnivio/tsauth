@@ -2,6 +2,13 @@
 
 **⚠️ Active development. Not yet ready for production use.**
 
+> **⚠️ The full login/authentication flow is not yet implemented.** OIDC sign-in,
+> device attestation, and the end-to-end approval *enforcement* path are still
+> incomplete — the codebase is currently a design-complete skeleton, not a
+> functioning access gate. Do not deploy it as a security control. See
+> [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for the full implementation-status
+> and findings report.
+
 ![TSAuth — Biometric Access Verification for Tailscale](./docs/banner.webp)
 
 TSAuth adds biometric step-up verification to [Tailscale](https://tailscale.com/) network access. Before a protected resource can be reached — whether a browser application, native API, database, or SSH server — the user must approve the access attempt using device-native biometrics (fingerprint or facial recognition) on a trusted mobile device.
@@ -76,11 +83,19 @@ cd service && go run ./cmd/approval-service/ -config /etc/tsauth/config.json
 - [`ADVERSARIAL_REVIEW.md`](./ADVERSARIAL_REVIEW.md) — External security review (15 Critical, 30 High findings)
 - [`ADVERSARIAL_REREVIEW.md`](./ADVERSARIAL_REREVIEW.md) — Re-review confirming all architecture issues resolved
 - [`REVIEW_RESPONSE.md`](./REVIEW_RESPONSE.md) — Finding-by-finding resolution map
+- [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) — Implementation-status audit of the code vs. the spec (2026-06-19)
 - [`docs/traceability.csv`](./docs/traceability.csv) — Requirement-to-artifact traceability matrix
 
 ## Status
 
-This project is in **active development**. All 15 Critical and 30 High findings from the adversarial review have been resolved in the specification. The Go authorization plane (contracts, service, daemon, SDK) is implemented. Remaining work includes the Android application, full test suite, per-OS enforcement bypass proofs, signed packaging, and independent security review.
+This project is in **active development**. All 15 Critical and 30 High findings from the adversarial review have been resolved **in the specification**. The Go authorization plane (contracts, service, daemon, SDK) and the Android approver are **scaffolded** against that spec, but key security-critical paths are **not yet implemented or wired**, including:
+
+- **Login / OIDC authentication** and ID-token verification (no JWKS / `iss` / `aud` / `nonce` / PKCE validation yet)
+- **Device hardware attestation** verification (currently a placeholder)
+- **End-to-end approval enforcement** — the daemon does not yet perform the live approval round-trip or verify Access Grant Token / approval-response signatures
+- Production **KMS signing** and **envelope encryption** (Vault Transit), **mTLS/TLS** transport, and **multi-tenant RLS** enforcement
+
+Until these land, the system **does not enforce access** and must not be relied upon as a security control. See [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for the detailed status and findings. Remaining work also includes the full test suite, per-OS enforcement bypass proofs, signed packaging, and independent security review.
 
 ## License
 
