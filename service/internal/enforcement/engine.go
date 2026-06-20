@@ -48,14 +48,15 @@ type EnvelopeEncrypter interface {
 }
 
 // NewApprovalEngine creates a new ApprovalEngine.
-func NewApprovalEngine(db *sql.DB, auditWriter *audit.ChainWriter, outboxWriter *messaging.OutboxWriter, delivery *messaging.DeliveryStream, requestSigner RequestSigner, grantSigner GrantSigner) *ApprovalEngine {
+func NewApprovalEngine(db *sql.DB, auditWriter *audit.ChainWriter, outboxWriter *messaging.OutboxWriter, delivery *messaging.DeliveryStream, requestSigner RequestSigner, grantSigner GrantSigner, encrypter EnvelopeEncrypter) *ApprovalEngine {
 	return &ApprovalEngine{
-		db:           db,
-		auditWriter:  auditWriter,
-		outboxWriter: outboxWriter,
-		delivery:     delivery,
+		db:            db,
+		auditWriter:   auditWriter,
+		outboxWriter:  outboxWriter,
+		delivery:      delivery,
 		requestSigner: requestSigner,
 		grantSigner:   grantSigner,
+		encrypter:     encrypter,
 	}
 }
 
@@ -245,12 +246,19 @@ func (ae *ApprovalEngine) ProcessApproval(ctx context.Context, input ProcessAppr
 	var srcNodeID string
 	var srcNodeKeyEpoch int64
 
+	// src_node_key_epoch is NOT a column of approval_requests; it is the source
+	// node's CURRENT key epoch, read from the nodes table at mint time by joining
+	// on the initiating Tailscale node id (approval_requests.src_node_id =
+	// nodes.ts_stable_node_id). COALESCE to 0 if the node row is absent.
 	err = tx.QueryRowContext(ctx, `
-		SELECT state, state_version, user_id, resource_id, scope, binding,
-		       policy_version, rule_id, src_node_id, 0
-		FROM approval_requests
-		WHERE tenant_id = $1 AND id = $2
-		FOR UPDATE
+		SELECT ar.state, ar.state_version, ar.user_id, ar.resource_id, ar.scope, ar.binding,
+		       ar.policy_version, ar.rule_id, ar.src_node_id,
+		       COALESCE(n.node_key_epoch, 0)
+		FROM approval_requests ar
+		LEFT JOIN nodes n
+		       ON n.tenant_id = ar.tenant_id AND n.ts_stable_node_id = ar.src_node_id
+		WHERE ar.tenant_id = $1 AND ar.id = $2
+		FOR UPDATE OF ar
 	`, input.TenantID, input.RequestID).Scan(
 		&currentState, &currentVersion, &userID, &resourceID, &scope,
 		&bindingBytes, &policyVersion, &ruleID, &srcNodeID, &srcNodeKeyEpoch,
@@ -265,14 +273,48 @@ func (ae *ApprovalEngine) ProcessApproval(ctx context.Context, input ProcessAppr
 		return result, nil
 	}
 
-	// Verify device counter (DR-SIG-6)
-	var deviceCounter int64
-	err = tx.QueryRowContext(ctx, `
-		SELECT counter FROM devices WHERE tenant_id = $1 AND id = $2
-	`, input.TenantID, input.DeviceID).Scan(&deviceCounter)
-	if err != nil {
-		return nil, fmt.Errorf("enforcement: fetch device counter: %w", err)
+	// Deserialize scope binding from request (C8 fix)
+	var binding contracts.ScopeBinding
+	if len(bindingBytes) > 0 {
+		if err := cose.DecodeCanonical(bindingBytes, &binding); err != nil {
+			return nil, fmt.Errorf("enforcement: decode binding: %w", err)
+		}
 	}
+
+	// Query current authorization epoch (C8 fix)
+	var authzEpoch int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(epoch), 1) FROM policies WHERE tenant_id = $1
+	`, input.TenantID).Scan(&authzEpoch)
+	if err != nil {
+		authzEpoch = 1
+	}
+
+	// Verify device identity and signature (DR-SIG-5/6)
+	var deviceCounter int64
+	var deviceApprovalPub, deviceAuthPub []byte
+	err = tx.QueryRowContext(ctx, `
+		SELECT counter, approval_auth_pub, device_auth_pub
+		FROM devices WHERE tenant_id = $1 AND id = $2
+		FOR UPDATE
+	`, input.TenantID, input.DeviceID).Scan(&deviceCounter, &deviceApprovalPub, &deviceAuthPub)
+	if err != nil {
+		return nil, fmt.Errorf("enforcement: fetch device: %w", err)
+	}
+
+	// Verify the device biometric signature over the approval response (DR-SIG-5)
+	// APPROVE must use approval_auth key; DENY must use device_auth key
+	var verificationKey ed25519.PublicKey
+	if input.Decision == contracts.DecisionApprove {
+		verificationKey = ed25519.PublicKey(deviceApprovalPub)
+	} else {
+		verificationKey = ed25519.PublicKey(deviceAuthPub)
+	}
+	if err := contracts.VerifyApprovalResponse(input.SignedResponse, verificationKey); err != nil {
+		return nil, fmt.Errorf("enforcement: approval response signature verification failed: %w", err)
+	}
+
+	// Verify device counter (DR-SIG-6)
 	if input.SignedResponse.DeviceCounter <= deviceCounter {
 		return nil, fmt.Errorf("enforcement: invalid device counter %d <= %d", input.SignedResponse.DeviceCounter, deviceCounter)
 	}
@@ -311,7 +353,7 @@ func (ae *ApprovalEngine) ProcessApproval(ctx context.Context, input ProcessAppr
 
 	// If APPROVED, mint grant idempotently (DR-SVC-2)
 	if input.Decision == contracts.DecisionApprove {
-		grantJTI, agtBytes, err := ae.mintGrant(ctx, tx, input.TenantID, input.RequestID, userID, srcNodeID, resourceID, scope, policyVersion, ruleID)
+		grantJTI, agtBytes, err := ae.mintGrant(ctx, tx, input.TenantID, input.RequestID, userID, srcNodeID, input.DeviceID, resourceID, scope, policyVersion, ruleID, binding, srcNodeKeyEpoch, authzEpoch)
 		if err != nil {
 			return nil, fmt.Errorf("enforcement: mint grant: %w", err)
 		}
@@ -344,7 +386,7 @@ func (ae *ApprovalEngine) ProcessApproval(ctx context.Context, input ProcessAppr
 // ─── Grant Minting ────────────────────────────────────────────────────────
 
 // mintGrant creates a signed AGT and persists it idempotently (DR-SVC-2).
-func (ae *ApprovalEngine) mintGrant(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, requestID uuid.UUID, userID uuid.UUID, srcNodeID string, resourceID uuid.UUID, scope string, policyVersion int64, ruleID string) (uuid.UUID, []byte, error) {
+func (ae *ApprovalEngine) mintGrant(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, requestID uuid.UUID, userID uuid.UUID, srcNodeID string, approverDeviceID uuid.UUID, resourceID uuid.UUID, scope string, policyVersion int64, ruleID string, binding contracts.ScopeBinding, srcNodeKeyEpoch int64, authzEpoch int64) (uuid.UUID, []byte, error) {
 	jti := uuid.Must(uuid.NewV7())
 
 	// Get user OIDC identity
@@ -368,8 +410,8 @@ func (ae *ApprovalEngine) mintGrant(ctx context.Context, tx *sql.Tx, tenantID uu
 		TenantID:            tenantID,
 		Subject:             *userIdentity,
 		SrcNodeID:           srcNodeID,
-		SrcNodeKeyEpoch:     0, // populated from actual node state
-		ApproverDeviceID:    uuid.Nil, // populated from request
+		SrcNodeKeyEpoch:     srcNodeKeyEpoch,
+		ApproverDeviceID:    approverDeviceID,
 		DeviceSecurityLevel: string(contracts.SecurityLevelStrongBox),
 		Resource: contracts.ResourceID{
 			TenantID:        tenantID,
@@ -382,9 +424,10 @@ func (ae *ApprovalEngine) mintGrant(ctx context.Context, tx *sql.Tx, tenantID uu
 		Protocol:        resource.Protocol,
 		DeploymentMode:   resource.DeploymentMode,
 		Scope:           contracts.Scope(scope),
+		Binding:         binding,
 		PolicyVersion:   policyVersion,
 		RuleID:          ruleID,
-		AuthzEpoch:      1, // current authz epoch
+		AuthzEpoch:      authzEpoch,
 		IssuedAt:        now,
 		NotBefore:       now,
 		ExpiresAt:       now.Add(maxTTL),
@@ -512,6 +555,35 @@ func (ae *ApprovalEngine) CancelApprovalRequest(ctx context.Context, tenantID, r
 	})
 
 	return tx.Commit()
+}
+
+// ─── Consume Grant (C4 fix, DR-GRANT-6) ────────────────────────────────────
+
+// ConsumeGrant atomically marks a single-use grant as consumed.
+// Returns true if the grant was successfully consumed, false if it was
+// already consumed, expired, or does not exist.
+// Per DR-GRANT-6: atomic CAS via the consume_grant SQL function.
+func (ae *ApprovalEngine) ConsumeGrant(ctx context.Context, tenantID uuid.UUID, jti uuid.UUID) (bool, error) {
+	var consumed bool
+	err := ae.db.QueryRowContext(ctx, `
+		SELECT consume_grant($1, $2, $3)
+	`, tenantID, jti, time.Now().UTC()).Scan(&consumed)
+	if err != nil {
+		return false, fmt.Errorf("enforcement: consume grant %s: %w", jti, err)
+	}
+
+	if consumed {
+		// Audit: GRANT_CONSUMED
+		ae.auditWriter.InsertTx(ctx, nil, audit.AuditEvent{
+			TenantID:      tenantID,
+			EventType:     audit.EventGrantConsumed,
+			Producer:      "service",
+			CorrelationID: uuid.New(),
+			Payload:       json.RawMessage(fmt.Sprintf(`{"jti":"%s"}`, jti)),
+		})
+	}
+
+	return consumed, nil
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
