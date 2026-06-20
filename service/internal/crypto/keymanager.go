@@ -4,11 +4,17 @@ package crypto
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -353,6 +359,86 @@ func buildPubKeySetForSigning(keySet *ActiveKeySet) []byte {
 	return h.Sum(nil)
 }
 
+// ─── Production Signer Gating ────────────────────────────────────────────────
+
+// NewSignerForMode returns a Signer appropriate for the given mode.
+// In development mode, returns an InMemorySigner.
+// In production mode, requires Vault configuration and returns an error if unavailable.
+func NewSignerForMode(devMode bool, vaultAddr string) (Signer, error) {
+	if devMode {
+		return NewInMemorySigner(), nil
+	}
+	if vaultAddr == "" {
+		return nil, fmt.Errorf("crypto: production requires Vault configuration (DR-KEY-8); set DNIVIO_DEVELOPMENT=true for dev mode")
+	}
+	return nil, fmt.Errorf("crypto: Vault Transit signer not yet implemented — set DNIVIO_DEVELOPMENT=true for dev mode")
+}
+
+// InitCrypto creates both signer and encrypter through production gates (C6).
+// In development mode, both are in-memory; in production, both require Vault.
+// This mirrors the service initCrypto function and exists for testability.
+func InitCrypto(devMode bool, vaultAddr string) (Signer, EnvelopeEncrypter, error) {
+	signer, err := NewSignerForMode(devMode, vaultAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	enc, err := NewEncrypterForMode(devMode, vaultAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return signer, enc, nil
+}
+
+// NewEncrypterForMode returns an EnvelopeEncrypter appropriate for the given mode.
+// In development mode, returns an InMemoryEncrypter.
+// In production mode, requires a durable KMS-backed encrypter configuration.
+func NewEncrypterForMode(devMode bool, vaultAddr string) (EnvelopeEncrypter, error) {
+	if devMode {
+		return NewInMemoryEncrypter(), nil
+	}
+	if vaultAddr == "" {
+		return nil, fmt.Errorf("crypto: production requires Vault configuration for envelope encryption (DR-SEC-1); set DNIVIO_DEVELOPMENT=true for dev mode")
+	}
+	return nil, fmt.Errorf("crypto: Vault Transit envelope encryption not yet implemented — set DNIVIO_DEVELOPMENT=true for dev mode")
+}
+
+// LoadRootPubKey loads an Ed25519 root public key from a hex-encoded file (DR-KEY-10).
+func LoadRootPubKey(path string) (ed25519.PublicKey, string, error) {
+	if path == "" {
+		return nil, "", fmt.Errorf("crypto: root public key file path is required")
+	}
+	hexBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("crypto: read root pub key file %s: %w", path, err)
+	}
+	trimmed := strings.TrimSpace(string(hexBytes))
+	keyBytes, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, "", fmt.Errorf("crypto: decode root pub key from %s: %w", path, err)
+	}
+	if len(keyBytes) != ed25519.PublicKeySize {
+		return nil, "", fmt.Errorf("crypto: invalid Ed25519 public key size %d (expected %d) in %s", len(keyBytes), ed25519.PublicKeySize, path)
+	}
+	pubKey := ed25519.PublicKey(keyBytes)
+	fp := fmt.Sprintf("%x", sha256.Sum256(pubKey))
+	return pubKey, fp, nil
+}
+
+// LoadRootSignature loads an offline root signature from a file and applies it to the key set (DR-KEY-10).
+func LoadRootSignature(km *KeyManager, sigPath string) error {
+	if sigPath == "" {
+		return fmt.Errorf("crypto: root signature file path is required")
+	}
+	sig, err := os.ReadFile(sigPath)
+	if err != nil {
+		return fmt.Errorf("crypto: read root sig file %s: %w", sigPath, err)
+	}
+	if err := km.SetRootSignature(sig); err != nil {
+		return fmt.Errorf("crypto: set root signature from %s: %w", sigPath, err)
+	}
+	return nil
+}
+
 // ─── In-Memory Signer (for testing/development) ────────────────────────────
 
 // InMemorySigner implements Signer using in-memory Ed25519 keys.
@@ -432,36 +518,56 @@ func NewInMemoryEncrypter() *InMemoryEncrypter {
 	}
 }
 
-// Encrypt implements EnvelopeEncrypter.
+// Encrypt implements EnvelopeEncrypter using AES-256-GCM.
 func (e *InMemoryEncrypter) Encrypt(ctx context.Context, tenantID uuid.UUID, plaintext []byte) ([]byte, error) {
 	key, err := e.getOrCreateKey(tenantID)
 	if err != nil {
 		return nil, err
 	}
-	// Simple AES-GCM encryption would go here; stubbed for now
-	_ = key
-	encrypted := make([]byte, len(plaintext)+32)
-	copy(encrypted, plaintext)
-	// XOR with key for simple encryption (REPLACE with AES-256-GCM in production)
-	for i := 0; i < len(plaintext); i++ {
-		encrypted[i] ^= key[i%len(key)]
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("inmemory: create cipher: %w", err)
 	}
-	return encrypted, nil
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("inmemory: create gcm: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("inmemory: generate nonce: %w", err)
+	}
+
+	// ciphertext = nonce || gcm-seal(plaintext)
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
-// Decrypt implements EnvelopeEncrypter.
+// Decrypt implements EnvelopeEncrypter using AES-256-GCM.
 func (e *InMemoryEncrypter) Decrypt(ctx context.Context, tenantID uuid.UUID, ciphertext []byte) ([]byte, error) {
 	key, err := e.getOrCreateKey(tenantID)
 	if err != nil {
 		return nil, err
 	}
-	// Simple decryption (REPLACE with AES-256-GCM in production)
-	plaintext := make([]byte, len(ciphertext)-32)
-	copy(plaintext, ciphertext[:len(plaintext)])
-	for i := 0; i < len(plaintext); i++ {
-		plaintext[i] ^= key[i%len(key)]
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("inmemory: create cipher: %w", err)
 	}
-	return plaintext, nil
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("inmemory: create gcm: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("inmemory: ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
 func (e *InMemoryEncrypter) getOrCreateKey(tenantID uuid.UUID) ([]byte, error) {
