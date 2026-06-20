@@ -16,6 +16,7 @@ type Config struct {
 	Service     ServiceConfig  `json:"service"`
 	Database    DatabaseConfig `json:"database"`
 	Vault       VaultConfig    `json:"vault"`
+	Crypto      CryptoConfig   `json:"crypto"`
 	Valkey      ValkeyConfig   `json:"valkey"`
 	OIDC        OIDCConfig     `json:"oidc"`
 	Audit       AuditConfig    `json:"audit"`
@@ -54,6 +55,12 @@ type VaultConfig struct {
 	KeyPrefix     string        `json:"key_prefix"`     // e.g., "dnivio-"
 	RequestTimeout time.Duration `json:"request_timeout"`
 	MaxRetries    int           `json:"max_retries"`
+}
+
+// CryptoConfig is the cryptographic root-of-trust configuration (DR-KEY-10).
+type CryptoConfig struct {
+	RootPubKeyFile string `json:"root_pub_key_file"` // path to offline root public key (hex-encoded)
+	RootSigFile    string `json:"root_sig_file"`     // path to offline root signature over initial key set
 }
 
 // ValkeyConfig is the Valkey (Redis-compatible) configuration for rate limiting.
@@ -140,7 +147,7 @@ func DefaultConfig() *Config {
 			Host:           "localhost",
 			Port:           5432,
 			Database:       "dnivio",
-			User:           "dnivio",
+			User:           "dnivio_app", // restricted application role (C9 fix: not table owner)
 			MaxConns:       200,
 			MinConns:       20,
 			MaxIdleTime:    5 * time.Minute,
