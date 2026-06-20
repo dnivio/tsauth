@@ -56,20 +56,9 @@ type RequestEnvelope struct {
 // NewRequestEnvelope creates and signs a RequestEnvelope.
 // signer is the service's request_sig Ed25519 private key.
 func NewRequestEnvelope(signer ed25519.PrivateKey, kid string, payload *RequestPayload) (*RequestEnvelope, error) {
-	payload.Ver = 2
-	if payload.IssuedAt.IsZero() {
-		payload.IssuedAt = time.Now().UTC()
-	}
-	if payload.ExpiresAt.IsZero() {
-		payload.ExpiresAt = payload.IssuedAt.Add(60 * time.Second)
-	}
-
-	// Compute display_digest over the exact fields shown to the user
-	payload.DisplayDigest = ComputeDisplayDigest(payload)
-
-	payloadBytes, err := cose.EncodeCanonical(payload)
+	payloadBytes, err := PrepareRequestPayload(payload)
 	if err != nil {
-		return nil, fmt.Errorf("envelope: marshal request payload: %w", err)
+		return nil, err
 	}
 
 	msg, err := cose.Sign1(signer, kid, "dnivio-req-v2", payloadBytes, nil)
@@ -78,6 +67,26 @@ func NewRequestEnvelope(signer ed25519.PrivateKey, kid string, payload *RequestP
 	}
 
 	return &RequestEnvelope{Message: msg, Payload: payload}, nil
+}
+
+// PrepareRequestPayload prepares a RequestPayload for signing: sets defaults,
+// computes display_digest, and returns the canonical CBOR bytes.
+func PrepareRequestPayload(payload *RequestPayload) ([]byte, error) {
+	payload.Ver = 2
+	if payload.IssuedAt.IsZero() {
+		payload.IssuedAt = time.Now().UTC()
+	}
+	if payload.ExpiresAt.IsZero() {
+		payload.ExpiresAt = payload.IssuedAt.Add(60 * time.Second)
+	}
+
+	payload.DisplayDigest = ComputeDisplayDigest(payload)
+
+	payloadBytes, err := cose.EncodeCanonical(payload)
+	if err != nil {
+		return nil, fmt.Errorf("envelope: marshal request payload: %w", err)
+	}
+	return payloadBytes, nil
 }
 
 // VerifyRequestEnvelope verifies a COSE_Sign1 request envelope and returns the payload.
@@ -255,6 +264,22 @@ type AccessGrantToken struct {
 
 // NewAccessGrantToken creates and signs an AGT with the grant_sig key.
 func NewAccessGrantToken(signer ed25519.PrivateKey, kid string, payload *AGTPayload) (*AccessGrantToken, error) {
+	payloadBytes, err := PrepareAGTPayload(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	msg, err := cose.Sign1(signer, kid, "dnivio-agt-v2", payloadBytes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("envelope: sign agt: %w", err)
+	}
+
+	return &AccessGrantToken{Message: msg, Payload: payload}, nil
+}
+
+// PrepareAGTPayload prepares an AGTPayload for signing: sets defaults and
+// returns the canonical CBOR bytes.
+func PrepareAGTPayload(payload *AGTPayload) ([]byte, error) {
 	payload.Ver = 2
 	now := time.Now().UTC()
 	if payload.IssuedAt.IsZero() {
@@ -268,13 +293,7 @@ func NewAccessGrantToken(signer ed25519.PrivateKey, kid string, payload *AGTPayl
 	if err != nil {
 		return nil, fmt.Errorf("envelope: marshal agt payload: %w", err)
 	}
-
-	msg, err := cose.Sign1(signer, kid, "dnivio-agt-v2", payloadBytes, nil)
-	if err != nil {
-		return nil, fmt.Errorf("envelope: sign agt: %w", err)
-	}
-
-	return &AccessGrantToken{Message: msg, Payload: payload}, nil
+	return payloadBytes, nil
 }
 
 // VerifyAccessGrantToken verifies a COSE_Sign1 AGT and performs all acceptance checks per DR-GRANT-2.

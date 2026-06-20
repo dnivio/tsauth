@@ -148,7 +148,66 @@ func Sign1(signer ed25519.PrivateKey, kid, typ string, payload, externalAAD []by
 	}, nil
 }
 
-// Verify1 verifies a COSE_Sign1 message against the given public key.
+// BuildSigStructure builds the COSE SigStructure bytes that must be signed.
+// Returns the serialized sig structure, the protected header bytes, and the headers.
+// The caller must sign sigStructureBytes with the appropriate key.
+func BuildSigStructure(kid, typ string, payload, externalAAD []byte) (sigStructureBytes, protectedBytes []byte, headers *Headers, err error) {
+	if encModeErr != nil {
+		return nil, nil, nil, fmt.Errorf("cose: encoder init: %w", encModeErr)
+	}
+
+	h := Headers{
+		Algorithm: AlgorithmEdDSA,
+		KeyID:     kid,
+		Type:      typ,
+	}
+
+	protectedBytes, err = encMode.Marshal(h)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("cose: marshal protected headers: %w", err)
+	}
+
+	if externalAAD == nil {
+		externalAAD = []byte{}
+	}
+
+	sigStruct := sigStructure{
+		Context:     "Signature1",
+		Protected:   protectedBytes,
+		ExternalAAD: externalAAD,
+		Payload:     payload,
+	}
+
+	sigStructureBytes, err = encMode.Marshal(sigStruct)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("cose: marshal sig structure: %w", err)
+	}
+
+	return sigStructureBytes, protectedBytes, &h, nil
+}
+
+// Sign1WithSignature creates a COSE_Sign1 message with a pre-computed Ed25519 signature.
+// Used when the private key is managed externally (e.g., via KMS/KeyManager).
+func Sign1WithSignature(kid, typ string, payload, externalAAD, signature []byte) (*Sign1Message, error) {
+	if encModeErr != nil {
+		return nil, fmt.Errorf("cose: encoder init: %w", encModeErr)
+	}
+
+	headers := Headers{
+		Algorithm: AlgorithmEdDSA,
+		KeyID:     kid,
+		Type:      typ,
+	}
+
+	return &Sign1Message{
+		Protected:   headers,
+		Unprotected: nil,
+		Payload:     payload,
+		Signature:   signature,
+	}, nil
+}
+
+// Ensure ed25519 import
 // Returns the raw payload bytes on success.
 // Per DR-SIG-1: must verify algorithm, kid, canonical encoding before trusting payload.
 func Verify1(msg *Sign1Message, pubKey ed25519.PublicKey) ([]byte, *Headers, error) {
