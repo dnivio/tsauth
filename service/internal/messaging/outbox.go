@@ -248,13 +248,23 @@ func (ds *DeliveryStream) ReleaseLease(ctx context.Context, lease *ConsumerLease
 // NotifyConsumer sends a wake-up notification to any watcher for a consumer.
 // Uses Postgres LISTEN/NOTIFY as a hint only (ADR-006).
 func (ds *DeliveryStream) NotifyConsumer(ctx context.Context, tenantID uuid.UUID, consumer string) error {
-	key := fmt.Sprintf("%s/%s", tenantID.String(), consumer)
-	_, err := ds.db.ExecContext(ctx, fmt.Sprintf("NOTIFY %s", key))
+	channel := fmt.Sprintf("dnivio_%s_%s", hexEncode(tenantID[:]), hexEncode([]byte(consumer)))
+	_, err := ds.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, channel)
 	if err != nil {
 		// Notify is best-effort; core delivery uses the outbox
 		return nil
 	}
 	return nil
+}
+
+func hexEncode(b []byte) string {
+	const hex = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = hex[v>>4]
+		out[i*2+1] = hex[v&0x0f]
+	}
+	return string(out)
 }
 
 // ─── Message Types ────────────────────────────────────────────────────────

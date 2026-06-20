@@ -428,6 +428,41 @@ SELECT create_tenant_rls_policy('audit_events');
 SELECT create_tenant_rls_policy('inventory_snapshots');
 SELECT create_tenant_rls_policy('breakglass_authorizations');
 
+-- FORCE RLS on all tenant-scoped tables (C9 fix).
+-- Without FORCE, table owners bypass RLS. The application must use a
+-- restricted role (dnivio_app) that is NOT a table owner.
+ALTER TABLE users FORCE ROW LEVEL SECURITY;
+ALTER TABLE identity_links FORCE ROW LEVEL SECURITY;
+ALTER TABLE devices FORCE ROW LEVEL SECURITY;
+ALTER TABLE nodes FORCE ROW LEVEL SECURITY;
+ALTER TABLE resources FORCE ROW LEVEL SECURITY;
+ALTER TABLE policies FORCE ROW LEVEL SECURITY;
+ALTER TABLE approval_requests FORCE ROW LEVEL SECURITY;
+ALTER TABLE grants FORCE ROW LEVEL SECURITY;
+ALTER TABLE active_sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE revocations FORCE ROW LEVEL SECURITY;
+ALTER TABLE outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE inbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE consumer_cursors FORCE ROW LEVEL SECURITY;
+ALTER TABLE audit_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE inventory_snapshots FORCE ROW LEVEL SECURITY;
+ALTER TABLE breakglass_authorizations FORCE ROW LEVEL SECURITY;
+
+-- Create a restricted application role that must use RLS (C9 fix).
+-- The migration owner (dnivio) creates tables; dnivio_app is the runtime role.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dnivio_app') THEN
+        CREATE ROLE dnivio_app WITH LOGIN;
+    END IF;
+    -- Grant usage but not ownership
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO dnivio_app');
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO dnivio_app');
+    EXECUTE format('GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO dnivio_app');
+    EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO dnivio_app');
+END;
+$$;
+
 -- ─── State Transition Functions ────────────────────────────────────────────
 
 -- Transition approval request state with validation
