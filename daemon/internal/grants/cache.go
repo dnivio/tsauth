@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -88,14 +89,16 @@ func bindingIDFromPayload(p *contracts.AGTPayload) string {
 
 // Cache manages the daemon-side grant cache with atomic consumption semantics.
 type Cache struct {
-	mu          sync.RWMutex
-	entries     map[string]*CacheEntry   // binding_key -> entry
-	consumedJTIs map[uuid.UUID]time.Time // JTI -> consumed_at, for REQUEST single-use
-	storage     *persistentStorage
+	mu            sync.RWMutex
+	entries       map[string]*CacheEntry   // binding_key -> entry
+	consumedJTIs  map[uuid.UUID]time.Time // JTI -> consumed_at, for REQUEST single-use
+	storage       *persistentStorage
+	trustRoot     ed25519.PublicKey           // C2: AGT signature verification key
+	remoteConsume func(ctx context.Context, jti uuid.UUID) (bool, error) // C4: server-side consumption
 }
 
 // NewCache creates a new grant cache.
-func NewCache(storagePath string) (*Cache, error) {
+func NewCache(storagePath string, trustRoot ed25519.PublicKey) (*Cache, error) {
 	ps, err := newPersistentStorage(storagePath)
 	if err != nil {
 		return nil, fmt.Errorf("grants: create storage: %w", err)
@@ -105,6 +108,7 @@ func NewCache(storagePath string) (*Cache, error) {
 		entries:      make(map[string]*CacheEntry),
 		consumedJTIs: make(map[uuid.UUID]time.Time),
 		storage:      ps,
+		trustRoot:    trustRoot,
 	}
 
 	// Load persisted consumed JTIs (for REQUEST/DURATION)
@@ -117,6 +121,7 @@ func NewCache(storagePath string) (*Cache, error) {
 
 // Store caches a grant entry.
 // SESSION grants are never persisted per DR-GRANT-4.
+// Prefer VerifyAndStore for AGTs received from the service.
 func (c *Cache) Store(entry *CacheEntry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -132,6 +137,46 @@ func (c *Cache) Store(entry *CacheEntry) error {
 	// REQUEST and DURATION grants are persisted with AEAD
 	c.entries[key] = entry
 	return c.storage.persistGrant(entry)
+}
+
+// VerifyAndStore deserializes, verifies, and returns a CacheEntry for a raw AGT.
+// Per DR-GRANT-2: verifies the COSE signature, epoch, policy version, expiry, and
+// security level. The caller is responsible for storing the entry in the cache.
+func VerifyAndStore(rawAGT []byte, trustRoot ed25519.PublicKey, currentAuthzEpoch, currentPolicyVersion int64, currentSensitivity contracts.Sensitivity) (*CacheEntry, error) {
+	agt, err := contracts.VerifyAccessGrantToken(rawAGT, trustRoot, currentAuthzEpoch, currentPolicyVersion, currentSensitivity)
+	if err != nil {
+		return nil, fmt.Errorf("grants: agt verification failed: %w", err)
+	}
+
+	entry := &CacheEntry{
+		JTI:       agt.Payload.JTI,
+		AGTBytes:  rawAGT,
+		Payload:   agt.Payload,
+		CachedAt:  time.Now().UTC(),
+		ExpiresAt: agt.Payload.ExpiresAt,
+	}
+
+	return entry, nil
+}
+
+// SetRemoteConsume sets the callback for server-side grant consumption (C4 fix).
+// The callback is invoked during Consume to atomically mark the grant consumed
+// at the Approval Service before allowing local use.
+func (c *Cache) SetRemoteConsume(fn func(ctx context.Context, jti uuid.UUID) (bool, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remoteConsume = fn
+}
+
+// StoreVerified deserializes, verifies, and stores a raw AGT in the cache (C2 fix).
+// This is the production entry point for AGT ingestion: raw bytes must pass
+// signature verification and DR-GRANT-2 checks before entering the cache.
+func (c *Cache) StoreVerified(rawAGT []byte, currentAuthzEpoch, currentPolicyVersion int64, currentSensitivity contracts.Sensitivity) error {
+	entry, err := VerifyAndStore(rawAGT, c.trustRoot, currentAuthzEpoch, currentPolicyVersion, currentSensitivity)
+	if err != nil {
+		return err
+	}
+	return c.Store(entry)
 }
 
 // Check verifies if a valid grant exists and returns it.
@@ -170,6 +215,15 @@ func (c *Cache) Consume(ctx context.Context, key string, jti uuid.UUID) (*CacheE
 	entry, ok := c.entries[key]
 	if !ok {
 		return nil, fmt.Errorf("grants: grant not found in cache")
+	}
+
+	// Remote consumption via Approval Service (C4 fix): must succeed
+	// before local consumption to prevent replay after daemon restart.
+	if c.remoteConsume != nil {
+		consumed, err := c.remoteConsume(ctx, jti)
+		if err != nil || !consumed {
+			return nil, fmt.Errorf("grants: remote consume failed: %w", err)
+		}
 	}
 
 	// Atomic CAS: only consume if not already consumed

@@ -5,7 +5,6 @@
 package interstitial
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"

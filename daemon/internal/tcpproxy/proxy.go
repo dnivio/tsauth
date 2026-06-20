@@ -5,6 +5,7 @@ package tcpproxy
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -155,7 +156,7 @@ func (p *Proxy) handleConnection(ctx context.Context, conn net.Conn) {
 
 	// Step 1: Tailscale ACL pre-authorization (DR-CAP-2)
 	// Must pass BEFORE creating any approval state
-	aclAllowed, principalID, err := p.preAuthorize(ctx, srcAddr, dstAddr)
+		aclAllowed, _, err := p.preAuthorize(ctx, srcAddr, dstAddr)
 	if err != nil || !aclAllowed {
 		// Deny without creating approval state — fail closed
 		return

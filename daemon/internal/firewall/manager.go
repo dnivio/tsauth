@@ -6,8 +6,10 @@ package firewall
 import (
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -223,7 +225,7 @@ table inet dnivio-isolation {
 `
 
 	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = exec.Command("echo", nftScript).Stdout
+	cmd.Stdin = strings.NewReader(nftScript)
 	return cmd.Run()
 }
 
@@ -356,17 +358,10 @@ func ProbeBackendReachability(backendAddr string, backendPort int, timeout time.
 }
 
 // dialTimeout wraps net.DialTimeout for testability.
-func dialTimeout(network, address string, timeout time.Duration) (interface{ Close() error }, error) {
-	// In tests, this is replaced with a mock
-	return netDialTimeout(network, address, timeout)
-}
-
-func netDialTimeout(network, address string, timeout time.Duration) (interface{ Close() error }, error) {
-	return exec.Command("timeout", fmt.Sprintf("%v", timeout.Seconds()),
-		"nc", "-z", address).Output()
+func dialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout(network, address, timeout)
 }
 
 // Ensure imports
 var _ = context.Background
-var _ = sync.Mutex
 var _ = time.Now

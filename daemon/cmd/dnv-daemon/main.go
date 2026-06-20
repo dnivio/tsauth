@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,10 +42,24 @@ func main() {
 	}
 
 	// ─── Initialize Grant Cache ──────────────────────────────────────────
-	grantCache, err := grants.NewCache(cfg.GrantCachePath)
+	// Load service trust root for AGT signature verification (C2 fix).
+	trustRoot, err := loadTrustRoot(cfg.TrustRootFile)
+	if err != nil {
+		log.Fatalf("Failed to load trust root: %v", err)
+	}
+	grantCache, err := grants.NewCache(cfg.GrantCachePath, trustRoot)
 	if err != nil {
 		log.Fatalf("Failed to initialize grant cache: %v", err)
 	}
+
+	// Wire remote consumption callback (C4 fix): single-use grants must
+	// be atomically consumed at the Approval Service before local use.
+	grantCache.SetRemoteConsume(func(ctx context.Context, jti uuid.UUID) (bool, error) {
+		// TODO: Call EnforcementChannel.ConsumeGrant via gRPC
+		// Until gRPC is wired, fail closed — single-use grants cannot be consumed
+		return false, fmt.Errorf("grants: remote consumption not available — gRPC channel not implemented")
+	})
+
 	log.Printf("Grant cache initialized at %s", cfg.GrantCachePath)
 
 	// ─── Initialize Firewall ─────────────────────────────────────────────
@@ -84,16 +100,21 @@ func main() {
 		MaxPreApprovalBytes: cfg.MaxPreApprovalBytes,
 		MaxAggregateMem:     cfg.MaxAggregateMem,
 		PreAuthorize: func(ctx context.Context, srcAddr, dstAddr string) (bool, string, error) {
-			// In production, evaluates Tailscale ACL before creating approval state (DR-CAP-2)
-			return true, "user-1", nil
+			// TODO: Implement Tailscale ACL evaluation via WhoIs (DR-CAP-2)
+			// Until implemented, fail closed.
+			return false, "", fmt.Errorf("enforcement: PreAuthorize not implemented — access denied by default (C1)")
 		},
 		RequestApproval: func(ctx context.Context, connID []byte, srcAddr, dstAddr string) (bool, error) {
-			return requestApproval(ctx, &ssh.ApprovalRequest{
+			result, err := requestApproval(ctx, &ssh.ApprovalRequest{
 				RequestID: uuid.Must(uuid.NewV7()),
 				Hostname:  dstAddr,
 				Protocol:  "TCP",
 				SessionID: connID,
 			}, cfg, grantCache)
+			if err != nil {
+				return false, err
+			}
+			return result.Approved, nil
 		},
 	})
 	if err != nil {
@@ -124,7 +145,7 @@ func main() {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			// Check grant cache for existing session/connection grant
 			key := fmt.Sprintf("%s/%s/%s", r.Host, r.Method, r.URL.Path)
-			if entry, ok := grantCache.Check(key); ok {
+			if _, ok := grantCache.Check(key); ok {
 				// Grant exists — forward to backend
 				forwardToBackend(w, r, cfg.BackendAddr, cfg.BackendPort)
 				return
@@ -166,17 +187,17 @@ func main() {
 // ─── Approval Request Helper ──────────────────────────────────────────────
 
 func requestApproval(ctx context.Context, req *ssh.ApprovalRequest, cfg *DaemonConfig, cache *grants.Cache) (*ssh.ApprovalResult, error) {
-	// In production, this communicates with the Approval Service via gRPC EnforcementChannel
-	// Creates an approval request, waits for the response, and returns the result
-	log.Printf("Approval requested: %s -> %s (%s)", req.Principal, req.Hostname, req.Protocol)
-
-	// Placeholder: simulate approval for testing
+	// TODO(C1): Implement gRPC EnforcementChannel call to the Approval Service.
+	// 1. Dial service at cfg.ServiceEndpoint with mTLS
+	// 2. Call EnforcementChannel.RequestApproval(request)
+	// 3. Wait for response with timeout (cfg.RequestTimeout)
+	// 4. Return result.Approved + result.GrantJTI
+	// Until implemented, fail closed — never approve without biometric verification.
+	log.Printf("WARNING: Approval requested but enforcement channel not yet implemented — failing closed for %s (%s)", req.Hostname, req.Protocol)
 	return &ssh.ApprovalResult{
-		Approved:  true,
-		GrantJTI:  uuid.Must(uuid.NewV7()),
+		Approved:  false,
 		SessionID: req.SessionID,
-		ExpiresAt: time.Now().Add(5 * time.Minute),
-	}, nil
+	}, fmt.Errorf("enforcement: gRPC channel not implemented — access denied by default (C1)")
 }
 
 func forwardToBackend(w http.ResponseWriter, r *http.Request, backendAddr string, backendPort int) {
@@ -202,6 +223,7 @@ type DaemonConfig struct {
 	MaxAggregateMem       int64         `json:"max_aggregate_mem"`
 	FirewallVerifyInterval time.Duration `json:"firewall_verify_interval"`
 	ServiceEndpoint       string        `json:"service_endpoint"`
+	TrustRootFile         string        `json:"trust_root_file"` // C2: path to grant_sig public key (hex-encoded)
 }
 
 func loadDaemonConfig(path string) (*DaemonConfig, error) {
@@ -242,6 +264,25 @@ func buildTLSConfig(cfg *DaemonConfig) (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS13,
 		RootCAs:      pool,
 	}, nil
+}
+
+// loadTrustRoot loads the service grant_sig public key for AGT verification (C2).
+func loadTrustRoot(path string) (ed25519.PublicKey, error) {
+	if path == "" {
+		return nil, fmt.Errorf("trust_root_file is required for AGT verification")
+	}
+	hexBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read trust root file: %w", err)
+	}
+	key, err := hex.DecodeString(strings.TrimSpace(string(hexBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("decode trust root: %w", err)
+	}
+	if len(key) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid trust root key size %d", len(key))
+	}
+	return ed25519.PublicKey(key), nil
 }
 
 // Ensure imports
