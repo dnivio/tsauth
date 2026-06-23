@@ -2,12 +2,13 @@
 
 **⚠️ Active development. Not yet ready for production use.**
 
-> **⚠️ The full login/authentication flow is not yet implemented.** OIDC sign-in,
-> device attestation, and the end-to-end approval *enforcement* path are still
-> incomplete — the codebase is currently a design-complete skeleton, not a
+> **⚠️ The full login/authentication and enforcement flow is not yet implemented.**
+> OIDC sign-in, device hardware attestation, and the end-to-end approval
+> *enforcement* round-trip are still incomplete — the codebase is a
+> design-complete skeleton undergoing a security-remediation pass, not a
 > functioning access gate. Do not deploy it as a security control. See
-> [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for the full implementation-status
-> and findings report.
+> [`TRIAGE.md`](./TRIAGE.md) and [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for
+> the finding-by-finding implementation status.
 
 ![TSAuth — Biometric Access Verification for Tailscale](./docs/banner.webp)
 
@@ -84,18 +85,32 @@ cd service && go run ./cmd/approval-service/ -config /etc/tsauth/config.json
 - [`ADVERSARIAL_REREVIEW.md`](./ADVERSARIAL_REREVIEW.md) — Re-review confirming all architecture issues resolved
 - [`REVIEW_RESPONSE.md`](./REVIEW_RESPONSE.md) — Finding-by-finding resolution map
 - [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) — Implementation-status audit of the code vs. the spec (2026-06-19)
+- [`TRIAGE.md`](./TRIAGE.md) — Triage of the audit findings to files/fixes, with remediation status
 - [`docs/traceability.csv`](./docs/traceability.csv) — Requirement-to-artifact traceability matrix
 
 ## Status
 
-This project is in **active development**. All 15 Critical and 30 High findings from the adversarial review have been resolved **in the specification**. The Go authorization plane (contracts, service, daemon, SDK) and the Android approver are **scaffolded** against that spec, but key security-critical paths are **not yet implemented or wired**, including:
+This project is in **active development and undergoing a security-remediation pass** against the implementation audit. All 15 Critical and 30 High findings from the adversarial review were resolved **in the specification**, and the Go authorization plane (contracts, service, daemon, SDK) plus the Android approver are **scaffolded** against that spec. A separate code-level audit ([`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md), triaged in [`TRIAGE.md`](./TRIAGE.md)) raised 44 findings; remediation is in progress and tracked by a regression test suite keyed to the finding IDs.
 
-- **Login / OIDC authentication** and ID-token verification (no JWKS / `iss` / `aud` / `nonce` / PKCE validation yet)
-- **Device hardware attestation** verification (currently a placeholder)
-- **End-to-end approval enforcement** — the daemon does not yet perform the live approval round-trip or verify Access Grant Token / approval-response signatures
-- Production **KMS signing** and **envelope encryption** (Vault Transit), **mTLS/TLS** transport, and **multi-tenant RLS** enforcement
+**Addressed so far (each with regression tests):**
 
-Until these land, the system **does not enforce access** and must not be relied upon as a security control. See [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for the detailed status and findings. Remaining work also includes the full test suite, per-OS enforcement bypass proofs, signed packaging, and independent security review.
+- **Fail-closed daemon** — the enforcement daemon builds and now denies by default instead of approving unconditionally (H1, C1)
+- **Signature verification** — the service verifies device approval-response signatures before accepting a decision (C3); the daemon verifies Access Grant Token COSE signatures and acceptance checks before caching (C2)
+- **Real envelope encryption** — AES-256-GCM replaces the previous repeating-key XOR placeholder (C6)
+- **Production crypto gating** — the in-memory signer/encrypter refuse to run outside development mode, and the offline root anchor is loaded from configuration (C5)
+- **Tenant isolation hardening** — forced Row-Level Security and a non-owner application role (C9); parameterized `LISTEN/NOTIFY` to close a SQL-injection vector (C10)
+- **Grant single-use & anti-replay** — grant consumption plus replay protection that survives daemon restarts (C4, H9)
+- **Correctness / concurrency** — thread-safe, tenant-scoped RBAC cache (H4), scoped IDOR ownership check (H5), audit row hashing extended over event detail (H7, partial), and serialized sequence allocation (H8)
+
+**Not yet implemented — the system still does NOT enforce access end-to-end:**
+
+- **Login / OIDC authentication** and ID-token verification — no JWKS / `iss` / `aud` / `nonce` / PKCE validation yet (H11)
+- **End-to-end approval round-trip** — the daemon↔service gRPC enforcement channel is not wired, so no live approval actually occurs (the daemon denies everything)
+- **Device hardware attestation** verification — still a placeholder (C7)
+- **Production KMS** signing and envelope encryption (Vault Transit) — only the dev in-memory path exists (C5)
+- **Per-request tenant binding** for RLS, **mTLS/TLS** transport (H10), and **Android Ed25519** verification (H12)
+
+Until these land, the system **does not enforce access** and must not be relied upon as a security control. See [`TRIAGE.md`](./TRIAGE.md) and [`SECURITY_AUDIT.md`](./SECURITY_AUDIT.md) for the full finding-by-finding status. Remaining work also includes the complete test suite, per-OS enforcement bypass proofs, signed packaging, and independent security review.
 
 ## License
 
