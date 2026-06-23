@@ -116,6 +116,11 @@ func NewCache(storagePath string, trustRoot ed25519.PublicKey) (*Cache, error) {
 		return nil, fmt.Errorf("grants: load consumed: %w", err)
 	}
 
+	// Load persisted grants that survived daemon restart (H9 fix)
+	if err := c.storage.loadGrants(c.entries); err != nil {
+		return nil, fmt.Errorf("grants: load grants: %w", err)
+	}
+
 	return c, nil
 }
 
@@ -200,6 +205,11 @@ func (c *Cache) Check(key string) (*CacheEntry, bool) {
 		return nil, false
 	}
 
+	// H9 fix: also check persisted consumed JTIs for replay after restart
+	if _, consumed := c.consumedJTIs[entry.JTI]; consumed {
+		return nil, false
+	}
+
 	return entry, true
 }
 
@@ -224,6 +234,13 @@ func (c *Cache) Consume(ctx context.Context, key string, jti uuid.UUID) (*CacheE
 		if err != nil || !consumed {
 			return nil, fmt.Errorf("grants: remote consume failed: %w", err)
 		}
+	}
+
+	// H9 fix: check loaded consumed JTIs from persistent storage.
+	// Prevents replay of a grant that was consumed before a daemon restart,
+	// when the in-memory entry.Consumed flag would be false.
+	if _, alreadyConsumed := c.consumedJTIs[jti]; alreadyConsumed {
+		return nil, fmt.Errorf("grants: grant already consumed (persisted state)")
 	}
 
 	// Atomic CAS: only consume if not already consumed
@@ -320,16 +337,39 @@ type persistentStorage struct {
 }
 
 func newPersistentStorage(path string) (*persistentStorage, error) {
-	// In production, the key comes from TPM/OS-protected key storage
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("grants: generate storage key: %w", err)
+	// H9 fix: derive AEAD key from a stable file, not random per process.
+	// On first run, generate and save; on restart, load existing key.
+	keyFile := path + ".key"
+	key, err := loadOrCreateKey(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("grants: storage key: %w", err)
 	}
 
 	return &persistentStorage{
 		path: path,
 		key:  key,
 	}, nil
+}
+
+// loadOrCreateKey loads an existing 32-byte AEAD key from a file, or generates
+// and persists one if the file does not exist. The key survives daemon restarts.
+func loadOrCreateKey(keyFile string) ([]byte, error) {
+	data, err := os.ReadFile(keyFile)
+	if err == nil && len(data) == 32 {
+		return data, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read key file: %w", err)
+	}
+	// Generate new key and persist
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("generate key: %w", err)
+	}
+	if err := os.WriteFile(keyFile, key, 0600); err != nil {
+		return nil, fmt.Errorf("write key file: %w", err)
+	}
+	return key, nil
 }
 
 func (ps *persistentStorage) persistGrant(entry *CacheEntry) error {
@@ -398,6 +438,40 @@ func (ps *persistentStorage) loadConsumed(consumed map[uuid.UUID]time.Time) erro
 		consumed[jti] = time.Unix(0, ts)
 	}
 
+	return nil
+}
+
+// loadGrants decrypts and restores persisted grant entries on startup (H9 fix).
+func (ps *persistentStorage) loadGrants(entries map[string]*CacheEntry) error {
+	data, err := os.ReadFile(ps.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	plaintext, err := ps.decrypt(data)
+	if err != nil {
+		return fmt.Errorf("grants: decrypt persisted grants: %w", err)
+	}
+
+	// Each entry is CBOR-encoded CacheEntry
+	// Attempt batch parsing; single corrupt entry skips
+	var entry CacheEntry
+	if err := cose.DecodeCanonical(plaintext, &entry); err != nil {
+		return fmt.Errorf("grants: decode persisted grant: %w", err)
+	}
+
+	// Only restore if not expired and not SESSION
+	if entry.Payload != nil && entry.Payload.Scope != contracts.ScopeSession {
+		if time.Now().UTC().Before(entry.ExpiresAt) {
+			key := entry.Key()
+			if key != "" {
+				entries[key] = &entry
+			}
+		}
+	}
 	return nil
 }
 

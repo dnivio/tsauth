@@ -484,3 +484,139 @@ func TestConsume_FailsWithRemoteConsumeRejection(t *testing.T) {
 		t.Fatal("Consume should fail when remote consumption is rejected")
 	}
 }
+
+// --- H9: Grant cache persistence key and replay protection ---
+
+func TestPersistentStorage_KeySurvivesRestart(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	dir := t.TempDir()
+
+	// First "process": store a grant
+	cache1, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 1: %v", err)
+	}
+	now := time.Now().UTC()
+	payload := validAGTPayload(now)
+	rawAGT, err := signAGT(priv, "dnivio-agt-v2", payload)
+	if err != nil {
+		t.Fatalf("sign AGT: %v", err)
+	}
+	if err := cache1.StoreVerified(rawAGT, payload.AuthzEpoch, payload.PolicyVersion, contracts.SensitivityStandard); err != nil {
+		t.Fatalf("StoreVerified: %v", err)
+	}
+
+	// Simulate restart: create a new cache with same path
+	cache2, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 2: %v", err)
+	}
+
+	// Verify the grant is still found (persistence worked)
+	key := fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/%d/%s",
+		payload.TenantID, payload.Subject.UserID, payload.SrcNodeID,
+		payload.ProtectedNodeID, payload.Resource.ServiceID, payload.Protocol,
+		payload.Scope, payload.PolicyVersion, "6e6f6e63652d616263")
+	if _, ok := cache2.Check(key); !ok {
+		t.Fatal("H9 FAIL: grant not found after restart — persistence key changed")
+	}
+}
+
+func TestConsume_RejectsReplayAfterRestart(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	payload := validAGTPayload(now)
+	rawAGT, err := signAGT(priv, "dnivio-agt-v2", payload)
+	if err != nil {
+		t.Fatalf("sign AGT: %v", err)
+	}
+
+	// First process: store and consume
+	cache1, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 1: %v", err)
+	}
+	cache1.SetRemoteConsume(func(ctx context.Context, jti uuid.UUID) (bool, error) {
+		return true, nil
+	})
+	if err := cache1.StoreVerified(rawAGT, payload.AuthzEpoch, payload.PolicyVersion, contracts.SensitivityStandard); err != nil {
+		t.Fatalf("StoreVerified: %v", err)
+	}
+	key := fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/%d/%s",
+		payload.TenantID, payload.Subject.UserID, payload.SrcNodeID,
+		payload.ProtectedNodeID, payload.Resource.ServiceID, payload.Protocol,
+		payload.Scope, payload.PolicyVersion, "6e6f6e63652d616263")
+	_, err = cache1.Consume(context.Background(), key, payload.JTI)
+	if err != nil {
+		t.Fatalf("Consume 1: %v", err)
+	}
+
+	// Simulate restart with same persistence files
+	cache2, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 2: %v", err)
+	}
+	cache2.SetRemoteConsume(func(ctx context.Context, jti uuid.UUID) (bool, error) {
+		return true, nil
+	})
+
+	// Try to consume again — must fail (replay protection from persisted consumedJTIs)
+	_, err = cache2.Consume(context.Background(), key, payload.JTI)
+	if err == nil {
+		t.Fatal("H9 FAIL: grant consumption succeeded after restart — replay not prevented")
+	}
+}
+
+func TestCheck_RejectsConsumedAfterRestart(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	payload := validAGTPayload(now)
+	rawAGT, err := signAGT(priv, "dnivio-agt-v2", payload)
+	if err != nil {
+		t.Fatalf("sign AGT: %v", err)
+	}
+
+	// First process: store and consume
+	cache1, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 1: %v", err)
+	}
+	cache1.SetRemoteConsume(func(ctx context.Context, jti uuid.UUID) (bool, error) {
+		return true, nil
+	})
+	if err := cache1.StoreVerified(rawAGT, payload.AuthzEpoch, payload.PolicyVersion, contracts.SensitivityStandard); err != nil {
+		t.Fatalf("StoreVerified: %v", err)
+	}
+	key := fmt.Sprintf("%s/%s/%s/%s/%s/%s/%s/%d/%s",
+		payload.TenantID, payload.Subject.UserID, payload.SrcNodeID,
+		payload.ProtectedNodeID, payload.Resource.ServiceID, payload.Protocol,
+		payload.Scope, payload.PolicyVersion, "6e6f6e63652d616263")
+	_, err = cache1.Consume(context.Background(), key, payload.JTI)
+	if err != nil {
+		t.Fatalf("Consume 1: %v", err)
+	}
+
+	// Simulate restart — Check must also reject consumed grants
+	cache2, err := NewCache(dir+"/grants.db", pub)
+	if err != nil {
+		t.Fatalf("NewCache 2: %v", err)
+	}
+
+	if _, ok := cache2.Check(key); ok {
+		t.Fatal("H9 FAIL: Check returned ok for consumed grant after restart")
+	}
+}
