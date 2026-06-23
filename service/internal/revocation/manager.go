@@ -6,6 +6,7 @@ package revocation
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type Manager struct {
 	delivery     *messaging.DeliveryStream
 	outboxWriter *messaging.OutboxWriter
 	mu           sync.RWMutex
+	seqMu        sync.Mutex // H8 fix: serializes sequence allocation
 }
 
 // NewManager creates a new revocation manager.
@@ -69,12 +71,17 @@ func (m *Manager) IssueRevocation(ctx context.Context, tenantID uuid.UUID, kind 
 	}
 	defer tx.Rollback()
 
+	// H8 fix: serialize sequence allocation to prevent MAX(seq)+1 race
+	m.seqMu.Lock()
+	defer m.seqMu.Unlock()
+
 	// Get next sequence number for this tenant
 	var nextSeq int64
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1
 		FROM revocations
 		WHERE tenant_id = $1
+		FOR UPDATE
 	`, tenantID).Scan(&nextSeq)
 	if err != nil {
 		return nil, fmt.Errorf("revocation: get next seq: %w", err)
@@ -109,11 +116,13 @@ func (m *Manager) IssueRevocation(ctx context.Context, tenantID uuid.UUID, kind 
 
 	// Queue delivery to all affected consumers via outbox
 	for _, consumer := range affectedConsumers {
+		// H8 fix: serialize revocation into payload so daemons know what was revoked
+		payload, _ := json.Marshal(rev)
 		msg := messaging.OutboxMessage{
 			TenantID:  tenantID,
 			Consumer:  consumer,
 			MessageID: uuid.New(),
-			Payload:   nil, // Will be populated with serialized RevocationNotification
+			Payload:   payload,
 		}
 		if err := m.outboxWriter.WriteTx(ctx, tx, msg); err != nil {
 			return nil, fmt.Errorf("revocation: write to outbox: %w", err)
@@ -328,9 +337,13 @@ func (m *Manager) RevokeDevice(ctx context.Context, tenantID, deviceID uuid.UUID
 }
 
 func (m *Manager) issueRevocationInTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, kind Kind, target string) (*Revocation, error) {
+	// H8 fix: also protect sequence allocation when called from paths that don't lock
+	m.seqMu.Lock()
+	defer m.seqMu.Unlock()
+
 	var nextSeq int64
 	err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(seq), 0) + 1 FROM revocations WHERE tenant_id = $1
+		SELECT COALESCE(MAX(seq), 0) + 1 FROM revocations WHERE tenant_id = $1 FOR UPDATE
 	`, tenantID).Scan(&nextSeq)
 	if err != nil {
 		return nil, err

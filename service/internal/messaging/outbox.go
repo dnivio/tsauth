@@ -19,7 +19,8 @@ import (
 
 // OutboxWriter writes messages to the outbox as part of a database transaction.
 type OutboxWriter struct {
-	db *sql.DB
+	db    *sql.DB
+	seqMu sync.Mutex // H8 fix: serializes outbox sequence allocation
 }
 
 // NewOutboxWriter creates a new OutboxWriter.
@@ -38,6 +39,9 @@ type OutboxMessage struct {
 // WriteTx writes a message to the outbox within an existing transaction.
 // The message will be delivered to the consumer via the ordered stream.
 func (w *OutboxWriter) WriteTx(ctx context.Context, tx *sql.Tx, msg OutboxMessage) error {
+	w.seqMu.Lock()
+	defer w.seqMu.Unlock() // H8 fix: prevent MAX(seq)+1 race
+
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO outbox (tenant_id, seq, consumer, message_id, payload, created_at)
 		VALUES ($1,

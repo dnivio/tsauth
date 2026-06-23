@@ -5,14 +5,13 @@ package audit
 
 import (
 	"context"
-
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
-
 
 	"github.com/google/uuid"
 )
@@ -133,7 +132,10 @@ func (cw *ChainWriter) InsertTx(ctx context.Context, tx *sql.Tx, event AuditEven
 		return 0, fmt.Errorf("audit: insert event: %w", err)
 	}
 
-	// Update additional audit fields (non-critical fields)
+	// Build the complete row hash from all fields (H7 fix: previously excluded detail columns)
+	rowHash := computeRowHash(event.TenantID, seq, event.EventType, event.Producer, eventBytes)
+
+	// Update detail fields AND recompute row_hash in a single statement (H7 fix)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE audit_events SET
 			producer_seq = $1,
@@ -148,13 +150,15 @@ func (cw *ChainWriter) InsertTx(ctx context.Context, tx *sql.Tx, event AuditEven
 			rule_id = $10,
 			policy_version = $11,
 			correlation_id = $12,
-			producer_signature = $13
-		WHERE tenant_id = $14 AND seq = $15
+			producer_signature = $13,
+			row_hash = $14
+		WHERE tenant_id = $15 AND seq = $16
 	`,
 		event.ProducerSeq, event.UserID, event.DeviceID, event.SrcNodeID,
 		event.NodeID, event.ResourceID, event.Protocol, event.Result,
 		event.RequestID, event.RuleID, event.PolicyVersion,
 		event.CorrelationID, event.ProducerSig,
+		rowHash,
 		event.TenantID, seq,
 	)
 	if err != nil {
@@ -162,6 +166,23 @@ func (cw *ChainWriter) InsertTx(ctx context.Context, tx *sql.Tx, event AuditEven
 	}
 
 	return seq, nil
+}
+
+// computeRowHash builds a SHA-256 row hash that covers all audit fields (H7 fix).
+// Previously the hash only covered prev_hash||seq||event_type||occurred_at,
+// allowing detail columns to be modified without breaking the chain.
+func computeRowHash(tenantID uuid.UUID, seq int64, eventType, producer string, payload json.RawMessage) []byte {
+	h := sha256.New()
+
+	// Include all fields in deterministic order
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(seq))
+	h.Write(buf[:])
+	h.Write([]byte(eventType))
+	h.Write([]byte(producer))
+	h.Write(payload)
+
+	return h.Sum(nil)
 }
 
 // ─── Audit Checkpoint (§16.1, DR-AUD-2) ──────────────────────────────────
@@ -275,6 +296,7 @@ func (cm *checkpointManager) createCheckpoints(ctx context.Context) error {
 func (cm *checkpointManager) exportCheckpoint(ctx context.Context, cp *Checkpoint) error {
 	// In production, this uses S3 PutObject with ObjectLockLegalHold or Compliance retention.
 	// For now, we store in the database as a fallback.
+	// H7 fix: use proper prev_hash and row_hash instead of breaking the chain
 	cpBytes, err := json.Marshal(cp)
 	if err != nil {
 		return err
@@ -285,8 +307,8 @@ func (cm *checkpointManager) exportCheckpoint(ctx context.Context, cp *Checkpoin
 		-- This is the database-resident placeholder for dev/testing.
 		INSERT INTO audit_events (tenant_id, seq, event_type, producer, payload, prev_hash, row_hash)
 		VALUES ($1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM audit_events WHERE tenant_id = $1),
-		        'AUDIT_CHECKPOINT', 'service', $2, '\x00', '\x00')
-	`, cp.TenantID, cpBytes)
+		        'AUDIT_CHECKPOINT', 'service', $2, $3, $4)
+	`, cp.TenantID, cpBytes, cp.LastHash, cp.LastHash)
 
 	return err
 }
@@ -297,7 +319,7 @@ func (cm *checkpointManager) exportCheckpoint(ctx context.Context, cp *Checkpoin
 // Checks that prev_hash and row_hash values form a valid chain.
 func VerifyChain(ctx context.Context, db *sql.DB, tenantID uuid.UUID, fromSeq, toSeq int64) (bool, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT seq, prev_hash, row_hash
+		SELECT seq, prev_hash, row_hash, event_type, producer, payload
 		FROM audit_events
 		WHERE tenant_id = $1 AND seq BETWEEN $2 AND $3
 		ORDER BY seq ASC
@@ -313,7 +335,9 @@ func VerifyChain(ctx context.Context, db *sql.DB, tenantID uuid.UUID, fromSeq, t
 	for rows.Next() {
 		var seq int64
 		var rowPrevHash, rowHash []byte
-		if err := rows.Scan(&seq, &rowPrevHash, &rowHash); err != nil {
+		var eventType, producer string
+		var payload json.RawMessage
+		if err := rows.Scan(&seq, &rowPrevHash, &rowHash, &eventType, &producer, &payload); err != nil {
 			return false, err
 		}
 
@@ -321,9 +345,11 @@ func VerifyChain(ctx context.Context, db *sql.DB, tenantID uuid.UUID, fromSeq, t
 			return false, fmt.Errorf("audit: chain broken at seq %d", seq)
 		}
 
-		// Verify row_hash = SHA-256(prev_hash || seq || event_type || occurred_at)
-		// This is a simplified check; full verification includes all fields.
-		_ = sha256.Sum256(rowPrevHash)
+		// H7 fix: recompute row_hash from all fields and compare
+		expectedHash := computeRowHash(tenantID, seq, eventType, producer, payload)
+		if !sha256Equal(expectedHash, rowHash) {
+			return false, fmt.Errorf("audit: row hash mismatch at seq %d — data may be tampered", seq)
+		}
 
 		prevHash = rowHash
 		firstRow = false

@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -118,17 +120,33 @@ var rolePermissions = map[Role][]Permission{
 
 // ─── Authorizer ──────────────────────────────────────────────────────────
 
+// roleCacheKey scopes role cache entries to (tenant, user). H4 fix.
+type roleCacheKey struct {
+	tenantID uuid.UUID
+	userID   uuid.UUID
+}
+
+// roleCacheEntry holds cached roles with a TTL. H4 fix.
+type roleCacheEntry struct {
+	roles   []Role
+	expires time.Time
+}
+
+// cacheTTL is the max age of a cached role entry before re-fetching from DB.
+const cacheTTL = 30 * time.Second
+
 // Authorizer enforces deny-by-default RBAC with object ownership and tenant scoping.
 type Authorizer struct {
-	db         *sql.DB
-	userRoles  map[uuid.UUID][]Role // user_id -> roles (cached; refreshed periodically)
+	db        *sql.DB
+	mu        sync.RWMutex                             // H4 fix: protects userRoles
+	userRoles map[roleCacheKey]roleCacheEntry           // H4 fix: keyed by (tenantID, userID)
 }
 
 // NewAuthorizer creates a new RBAC authorizer.
 func NewAuthorizer(db *sql.DB) *Authorizer {
 	return &Authorizer{
 		db:        db,
-		userRoles: make(map[uuid.UUID][]Role),
+		userRoles: make(map[roleCacheKey]roleCacheEntry),
 	}
 }
 
@@ -210,7 +228,6 @@ func (a *Authorizer) CheckTenantScoping(ctx context.Context, userID uuid.UUID, r
 // CheckObjectOwnership verifies tenant-scoped object ownership for IDOR protection.
 // The operation is on /devices/{deviceID}, /nodes/{nodeID}, /policies/{policyID}, etc.
 func (a *Authorizer) CheckObjectOwnership(ctx context.Context, userID, tenantID uuid.UUID, objectType string, objectID uuid.UUID) error {
-	// Verify the object exists in the user's tenant
 	var objTenantID uuid.UUID
 	var ownerID *uuid.UUID
 
@@ -237,11 +254,12 @@ func (a *Authorizer) CheckObjectOwnership(ctx context.Context, userID, tenantID 
 			return fmt.Errorf("auth: resource %s not found in tenant %s", objectID, tenantID)
 		}
 	case "policy":
+		// H5 fix: filter by the specific policy ID, not just any policy in the tenant
 		err := a.db.QueryRowContext(ctx, `
-			SELECT tenant_id FROM policies WHERE tenant_id = $1 AND version = (SELECT MAX(version) FROM policies WHERE tenant_id = $1)
-		`, tenantID).Scan(&objTenantID)
+			SELECT tenant_id FROM policies WHERE tenant_id = $1 AND id = $2
+		`, tenantID, objectID).Scan(&objTenantID)
 		if err != nil {
-			return fmt.Errorf("auth: policy not found in tenant %s", tenantID)
+			return fmt.Errorf("auth: policy %s not found in tenant %s", objectID, tenantID)
 		}
 	default:
 		return fmt.Errorf("auth: unknown object type %s", objectType)
@@ -253,10 +271,16 @@ func (a *Authorizer) CheckObjectOwnership(ctx context.Context, userID, tenantID 
 // ─── Role Resolution ────────────────────────────────────────────────────
 
 func (a *Authorizer) getRoles(ctx context.Context, userID, tenantID uuid.UUID) ([]Role, error) {
-	// Check cache first (in production, uses distributed cache with invalidation)
-	if roles, ok := a.userRoles[userID]; ok {
+	key := roleCacheKey{tenantID: tenantID, userID: userID}
+
+	// Check cache with mutex (H4 fix: thread-safe + tenant-scoped)
+	a.mu.RLock()
+	if entry, ok := a.userRoles[key]; ok && time.Now().UTC().Before(entry.expires) {
+		roles := entry.roles
+		a.mu.RUnlock()
 		return roles, nil
 	}
+	a.mu.RUnlock()
 
 	// Query role assignments from database
 	rows, err := a.db.QueryContext(ctx, `
@@ -277,7 +301,14 @@ func (a *Authorizer) getRoles(ctx context.Context, userID, tenantID uuid.UUID) (
 		roles = append(roles, Role(r))
 	}
 
-	a.userRoles[userID] = roles
+	// Store in cache with TTL (H4 fix)
+	a.mu.Lock()
+	a.userRoles[key] = roleCacheEntry{
+		roles:   roles,
+		expires: time.Now().UTC().Add(cacheTTL),
+	}
+	a.mu.Unlock()
+
 	return roles, rows.Err()
 }
 
@@ -307,7 +338,6 @@ func (a *Authorizer) hasAdminRole(roles []Role) bool {
 
 // AssignRole assigns a role to a user within a tenant.
 func (a *Authorizer) AssignRole(ctx context.Context, tenantID, userID, assignedBy uuid.UUID, role Role) error {
-	// The assigner must have permission to manage roles
 	if err := a.Check(ctx, assignedBy, tenantID, PermSecuritySettings, nil); err != nil {
 		return fmt.Errorf("auth: assign role: %w", err)
 	}
@@ -321,8 +351,10 @@ func (a *Authorizer) AssignRole(ctx context.Context, tenantID, userID, assignedB
 		return fmt.Errorf("auth: insert role: %w", err)
 	}
 
-	// Invalidate cache
-	delete(a.userRoles, userID)
+	// Invalidate cache entry for this (tenant, user) (H4 fix: tenant-scoped invalidation)
+	a.mu.Lock()
+	delete(a.userRoles, roleCacheKey{tenantID: tenantID, userID: userID})
+	a.mu.Unlock()
 
 	return nil
 }
@@ -341,19 +373,10 @@ func (a *Authorizer) RemoveRole(ctx context.Context, tenantID, userID, removedBy
 		return fmt.Errorf("auth: delete role: %w", err)
 	}
 
-	delete(a.userRoles, userID)
+	// Invalidate cache entry for this (tenant, user) (H4 fix)
+	a.mu.Lock()
+	delete(a.userRoles, roleCacheKey{tenantID: tenantID, userID: userID})
+	a.mu.Unlock()
+
 	return nil
 }
-
-// Add the user_roles table note: this would be in a follow-up migration.
-// CREATE TABLE user_roles (
-//     tenant_id uuid NOT NULL REFERENCES tenants(id),
-//     user_id uuid NOT NULL REFERENCES users(id),
-//     role text NOT NULL,
-//     assigned_by uuid NOT NULL REFERENCES users(id),
-//     assigned_at timestamptz NOT NULL DEFAULT now(),
-//     PRIMARY KEY (tenant_id, user_id, role)
-// );
-
-// Ensure imports
-var _ = context.Background
